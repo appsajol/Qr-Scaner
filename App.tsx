@@ -16,7 +16,8 @@ import {
   ScanLine,
   AlertTriangle,
   CheckCircle,
-  Database
+  Database,
+  Scan
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { ScannedRecord, ScanSession, ScanTarget } from './types';
@@ -26,7 +27,10 @@ import { supabase } from './services/supabaseClient';
 
 const SCANNER_ID = "qr-reader";
 
+type AppView = 'scan' | 'history';
+
 const App: React.FC = () => {
+  const [currentView, setCurrentView] = useState<AppView>('scan');
   const [records, setRecords] = useState<ScannedRecord[]>([]);
   const [session, setSession] = useState<ScanSession>({ partNumber: null, uniqueCode: null });
   const [isScanning, setIsScanning] = useState(false);
@@ -49,7 +53,6 @@ const App: React.FC = () => {
 
       if (error) throw error;
       
-      // Map database snake_case to frontend camelCase
       const mappedData: ScannedRecord[] = (data || []).map(item => ({
         id: item.id,
         partNumber: item.part_number,
@@ -62,7 +65,7 @@ const App: React.FC = () => {
       setRecords(mappedData);
     } catch (err) {
       console.error("Supabase fetch error:", err);
-      setError("ডেটা লোড করতে সমস্যা হয়েছে। দয়া করে রিফ্রেশ করুন।");
+      setError("ডেটা লোড করতে সমস্যা হয়েছে।");
     } finally {
       setIsLoading(false);
     }
@@ -112,16 +115,17 @@ const App: React.FC = () => {
           { facingMode: "environment" },
           config,
           (decodedText) => {
+            const cleaned = decodedText.trim();
             setSession(prev => ({
               ...prev,
-              [target]: decodedText
+              [target]: cleaned
             }));
             stopScanner();
           },
           () => {} 
         );
       } catch (err) {
-        setError("ক্যামেরা এক্সেস করা যায়নি। দয়া করে পারমিশন চেক করুন।");
+        setError("ক্যামেরা এক্সেস করা যায়নি।");
         setIsScanning(false);
       }
     }, 100);
@@ -129,9 +133,12 @@ const App: React.FC = () => {
 
   const generateId = () => {
     try {
-      return crypto.randomUUID();
-    } catch (e) {
+      if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+        return crypto.randomUUID();
+      }
       return `id-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    } catch (e) {
+      return `id-${Date.now()}`;
     }
   };
 
@@ -145,28 +152,22 @@ const App: React.FC = () => {
     setError(null);
 
     try {
-      // 1. Server-side Duplicate Check in Supabase
-      const { data: existing, error: checkError } = await supabase
+      const { data: existing } = await supabase
         .from('scanned_records')
         .select('id, part_number')
         .eq('unique_code', session.uniqueCode)
         .maybeSingle();
 
-      if (checkError) throw checkError;
-
       if (existing) {
-        setError(`ডুপ্লিকেট কোড: "${session.uniqueCode}" ইতিপূর্বে পার্ট "${existing.part_number}" এর জন্য সংরক্ষিত হয়েছে।`);
+        setError(`ডুপ্লিকেট কোড: ইতিপূর্বে ব্যবহৃত হয়েছে।`);
         setIsAnalyzing(false);
         return;
       }
 
-      // 2. AI Analysis
       const analysis = await analyzeScanPair(session.partNumber, session.uniqueCode);
-      
       const newRecordId = generateId();
       const timestamp = new Date().toISOString();
 
-      // 3. Insert into Supabase
       const { error: insertError } = await supabase
         .from('scanned_records')
         .insert([{
@@ -177,9 +178,14 @@ const App: React.FC = () => {
           analysis: analysis || "Verified"
         }]);
 
-      if (insertError) throw insertError;
+      if (insertError) {
+        if (insertError.code === '23505') {
+          setError(`ডুপ্লিকেট কোড: ডাটাবেসে রয়েছে।`);
+          return;
+        }
+        throw insertError;
+      }
 
-      // 4. Update local state
       const newLocalRecord: ScannedRecord = {
         id: newRecordId,
         partNumber: session.partNumber,
@@ -192,10 +198,11 @@ const App: React.FC = () => {
       setRecords(prev => [newLocalRecord, ...prev]);
       setSession({ partNumber: null, uniqueCode: null });
       setActiveTarget(ScanTarget.PART_NUMBER);
-      setSuccess("সফলভাবে সুপাবেস-এ সেভ করা হয়েছে!");
+      setSuccess("সফলভাবে ক্লাউডে সেভ করা হয়েছে!");
+      
     } catch (err) {
-      setError("সুপাবেস-এ ডেটা সেভ করতে সমস্যা হয়েছে। ইন্টারনেট কানেকশন চেক করুন।");
-      console.error("Save error:", err);
+      setError("ডেটা সেভ করতে সমস্যা হয়েছে।");
+      console.error("Save failure:", err);
     } finally {
       setIsAnalyzing(false);
     }
@@ -221,25 +228,22 @@ const App: React.FC = () => {
       setSuccess("রেকর্ডটি মুছে ফেলা হয়েছে।");
     } catch (err) {
       setError("রেকর্ড মুছতে সমস্যা হয়েছে।");
-      console.error("Delete error:", err);
     }
   };
 
   const exportToExcel = () => {
     if (records.length === 0) return;
-    
     try {
       const data = records.map(r => ({
-        'Timestamp': new Date(r.timestamp).toLocaleString(),
+        'Date/Time': new Date(r.timestamp).toLocaleString(),
         'Part Number': r.partNumber,
-        'Unique Serial Code': r.uniqueCode,
-        'AI Analysis': r.analysis
+        'Unique Serial': r.uniqueCode,
+        'AI Summary': r.analysis
       }));
-
       const ws = XLSX.utils.json_to_sheet(data);
       const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, "Scans");
-      XLSX.writeFile(wb, `Scan_Report_${new Date().toISOString().split('T')[0]}.xlsx`);
+      XLSX.utils.book_append_sheet(wb, ws, "Records");
+      XLSX.writeFile(wb, `XtraPro_Export_${new Date().toISOString().split('T')[0]}.xlsx`);
       setSuccess("এক্সেল ফাইল ডাউনলোড শুরু হয়েছে।");
     } catch (err) {
       setError("এক্সেল ফাইল তৈরি করা যায়নি।");
@@ -247,237 +251,219 @@ const App: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen pb-20 md:pb-8 flex flex-col font-sans bg-slate-50">
+    <div className="min-h-screen pb-24 md:pb-8 flex flex-col font-sans bg-slate-50">
       {/* Header */}
       <header className="bg-white border-b border-slate-200 px-4 py-4 sticky top-0 z-30 shadow-sm">
         <div className="max-w-4xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <div className="bg-blue-600 p-2 rounded-lg">
+            <div className="bg-blue-600 p-2 rounded-lg shadow-blue-200 shadow-lg">
               <Package className="text-white w-5 h-5" />
             </div>
-            <h1 className="font-bold text-xl tracking-tight text-slate-800">ScanPair</h1>
+            <h1 className="font-bold text-xl tracking-tight text-slate-800">XtraPro Scanner</h1>
           </div>
+          
           <div className="flex items-center gap-2">
-             <button 
-              onClick={fetchRecords}
-              className="p-2 text-slate-500 hover:text-blue-600 transition-colors"
-              title="Refresh Data"
-            >
-              <RefreshCw className={`w-5 h-5 ${isLoading ? 'animate-spin' : ''}`} />
-            </button>
-            <button 
-              onClick={exportToExcel}
-              disabled={records.length === 0}
-              className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white px-4 py-2 rounded-lg font-medium transition-all shadow-sm active:scale-95"
-            >
-              <FileSpreadsheet className="w-4 h-4" />
-              <span className="hidden sm:inline">Export Excel</span>
-            </button>
+             <div className="flex items-center gap-1 bg-slate-100 px-3 py-1 rounded-full border border-slate-200">
+                <div className={`w-2 h-2 rounded-full ${records.length > 0 ? 'bg-emerald-500' : 'bg-slate-300'}`} />
+                <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">
+                  {isLoading ? 'Syncing...' : 'Connected'}
+                </span>
+             </div>
           </div>
         </div>
       </header>
 
       <main className="flex-1 max-w-4xl mx-auto w-full p-4 space-y-6">
         
-        {/* Active Scan Area */}
-        {isScanning && (
-          <section className="bg-slate-900 rounded-3xl overflow-hidden shadow-2xl relative aspect-square max-w-sm mx-auto w-full animate-in fade-in zoom-in-95 duration-300 border-4 border-slate-800">
-            <div id={SCANNER_ID} className="w-full h-full bg-black"></div>
-            <ScannerOverlay activeTarget={activeTarget} isScanning={isScanning} />
-            <button 
-              onClick={stopScanner}
-              className="absolute top-4 right-4 bg-white/20 hover:bg-white/40 backdrop-blur-md text-white p-2 rounded-full transition-colors z-20"
-            >
-              <X className="w-6 h-6" />
-            </button>
-          </section>
-        )}
-
-        {/* Pairing Interface */}
-        <section className="bg-white border border-slate-200 rounded-2xl shadow-sm p-6">
-          <div className="flex flex-col sm:flex-row items-center justify-between gap-4 mb-6">
-            <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2">
-              <Database className="w-5 h-5 text-blue-600" />
-              Cloud Scan Entry
-            </h2>
-            <button 
-              onClick={handleResetSession}
-              className="text-slate-400 hover:text-red-500 flex items-center gap-1 text-sm font-medium transition-colors p-1"
-            >
-              <Trash2 className="w-4 h-4" />
-              Reset
-            </button>
-          </div>
-
-          <div className="space-y-4">
-            {/* Part Number Input */}
-            <div>
-              <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5 ml-1">
-                Part Number
-              </label>
-              <div className="relative flex items-center group">
-                <div className="absolute left-4 text-slate-400 group-focus-within:text-blue-500 transition-colors">
-                  <Hash className="w-5 h-5" />
-                </div>
-                <input 
-                  type="text"
-                  readOnly
-                  placeholder="Scan part code..."
-                  value={session.partNumber || ''}
-                  className={`w-full pl-12 pr-14 py-4 bg-slate-50 border-2 rounded-xl text-lg font-mono focus:outline-none transition-all ${
-                    session.partNumber ? 'border-blue-200 bg-blue-50/30' : 'border-slate-100 focus:border-blue-500'
-                  }`}
-                />
+        {/* VIEW 1: SCANNING */}
+        {currentView === 'scan' && (
+          <div className="animate-in fade-in duration-500">
+            {/* Active Scan Area */}
+            {isScanning && (
+              <section className="bg-slate-900 rounded-3xl overflow-hidden shadow-2xl relative aspect-square max-w-sm mx-auto w-full mb-6 animate-in zoom-in-95 duration-300 border-4 border-white">
+                <div id={SCANNER_ID} className="w-full h-full bg-black"></div>
+                <ScannerOverlay activeTarget={activeTarget} isScanning={isScanning} />
                 <button 
-                  onClick={() => startScanner(ScanTarget.PART_NUMBER)}
-                  className={`absolute right-2 p-3 rounded-lg transition-all ${
-                    activeTarget === ScanTarget.PART_NUMBER && isScanning 
-                      ? 'bg-blue-600 text-white shadow-lg' 
-                      : 'bg-white text-blue-600 hover:bg-blue-50 border border-blue-100 shadow-sm'
-                  }`}
+                  onClick={stopScanner}
+                  className="absolute top-4 right-4 bg-white/20 hover:bg-white/40 backdrop-blur-md text-white p-2 rounded-full transition-colors z-20"
                 >
-                  <Camera className="w-5 h-5" />
+                  <X className="w-6 h-6" />
                 </button>
-              </div>
-            </div>
-
-            {/* Unique Code Input */}
-            <div>
-              <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1.5 ml-1">
-                Unique Serial
-              </label>
-              <div className="relative flex items-center group">
-                <div className="absolute left-4 text-slate-400 group-focus-within:text-blue-500 transition-colors">
-                  <ScanLine className="w-5 h-5" />
-                </div>
-                <input 
-                  type="text"
-                  readOnly
-                  placeholder="Scan serial..."
-                  value={session.uniqueCode || ''}
-                  className={`w-full pl-12 pr-14 py-4 bg-slate-50 border-2 rounded-xl text-lg font-mono focus:outline-none transition-all ${
-                    session.uniqueCode ? 'border-blue-200 bg-blue-50/30' : 'border-slate-100 focus:border-blue-500'
-                  }`}
-                />
-                <button 
-                  onClick={() => startScanner(ScanTarget.UNIQUE_CODE)}
-                  className={`absolute right-2 p-3 rounded-lg transition-all ${
-                    activeTarget === ScanTarget.UNIQUE_CODE && isScanning 
-                      ? 'bg-blue-600 text-white shadow-lg' 
-                      : 'bg-white text-blue-600 hover:bg-blue-50 border border-blue-100 shadow-sm'
-                  }`}
-                >
-                  <Camera className="w-5 h-5" />
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <button 
-            onClick={handleSave}
-            disabled={!session.partNumber || !session.uniqueCode || isAnalyzing}
-            className="w-full mt-8 py-4 rounded-xl bg-slate-900 hover:bg-slate-800 disabled:bg-slate-100 disabled:text-slate-300 text-white font-bold text-lg transition-all shadow-md active:scale-[0.98] flex items-center justify-center gap-3"
-          >
-            {isAnalyzing ? (
-              <>
-                <Loader2 className="w-6 h-6 animate-spin" />
-                Syncing with Cloud...
-              </>
-            ) : (
-              <>
-                <CheckCircle2 className="w-6 h-6" />
-                Save to Database
-              </>
+              </section>
             )}
-          </button>
-        </section>
 
-        {/* Scan History */}
-        <section className="space-y-4">
-          <div className="flex items-center justify-between px-2">
-            <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
-              <History className="w-5 h-5 text-slate-500" />
-              Cloud History
-            </h3>
-            <div className="flex items-center gap-4">
-               {isLoading && <Loader2 className="w-4 h-4 animate-spin text-blue-600" />}
-               <span className="text-xs text-slate-400 font-medium">{records.length} records</span>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 gap-3">
-            {records.length === 0 && !isLoading ? (
-              <div className="bg-white border border-dashed border-slate-300 rounded-2xl p-10 text-center">
-                <p className="text-slate-400 text-sm font-medium">ক্লাউড হিস্ট্রি খালি। স্ক্যান শুরু করুন।</p>
-              </div>
-            ) : (
-              records.map((record) => (
-                <div 
-                  key={record.id} 
-                  className="bg-white border border-slate-200 rounded-2xl p-4 shadow-sm hover:shadow-md transition-shadow group relative"
+            {/* Pairing Interface */}
+            <section className="bg-white border border-slate-200 rounded-3xl shadow-sm p-6 sm:p-8">
+              <div className="flex flex-col sm:flex-row items-center justify-between gap-4 mb-8">
+                <h2 className="text-lg font-bold text-slate-800 flex items-center gap-2.5">
+                  <Scan className="w-5 h-5 text-blue-600" />
+                  Scanner Feed
+                </h2>
+                <button 
+                  onClick={handleResetSession}
+                  className="text-slate-400 hover:text-red-500 flex items-center gap-1.5 text-xs font-bold tracking-wider uppercase transition-colors"
                 >
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                    <div className="space-y-3 flex-1">
-                      <div className="flex items-center gap-4 flex-wrap">
-                        <div className="flex flex-col">
-                           <span className="text-[9px] text-slate-400 font-black uppercase tracking-widest">Part Number</span>
-                           <span className="font-mono text-slate-800 font-bold text-sm">{record.partNumber}</span>
-                        </div>
-                        <div className="w-px h-6 bg-slate-100 hidden sm:block"></div>
-                        <div className="flex flex-col">
-                           <span className="text-[9px] text-slate-400 font-black uppercase tracking-widest">Unique Serial</span>
-                           <span className="font-mono text-slate-800 font-bold text-sm">{record.uniqueCode}</span>
-                        </div>
-                        <span className="text-[10px] text-slate-400 ml-auto font-medium">
-                          {new Date(record.timestamp).toLocaleString([], { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' })}
-                        </span>
-                      </div>
-                      {record.analysis && (
-                        <div className="bg-blue-50/50 p-3 rounded-xl border border-blue-100">
-                          <p className="text-slate-700 text-xs leading-relaxed font-medium">
-                            {record.analysis}
-                          </p>
-                        </div>
-                      )}
+                  <Trash2 className="w-4 h-4" />
+                  Clear
+                </button>
+              </div>
+
+              <div className="space-y-6">
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Part Number</label>
+                  <div className="relative flex items-center group">
+                    <div className="absolute left-5 text-slate-400 group-focus-within:text-blue-500 transition-colors">
+                      <Hash className="w-5 h-5" />
                     </div>
-                    <button 
-                      onClick={() => { if(confirm('রেকর্ডটি মুছে ফেলবেন?')) deleteRecord(record.id) }}
-                      className="text-slate-300 hover:text-red-500 p-2 transition-colors sm:opacity-0 group-hover:opacity-100"
-                    >
-                      <Trash2 className="w-5 h-5" />
+                    <input 
+                      type="text" readOnly placeholder="Scan part..." value={session.partNumber || ''}
+                      className={`w-full pl-14 pr-16 py-5 bg-slate-50 border-2 rounded-2xl text-lg font-mono focus:outline-none transition-all ${
+                        session.partNumber ? 'border-blue-200 bg-blue-50/20' : 'border-slate-100'
+                      }`}
+                    />
+                    <button onClick={() => startScanner(ScanTarget.PART_NUMBER)} className={`absolute right-3 p-3.5 rounded-xl transition-all ${activeTarget === ScanTarget.PART_NUMBER && isScanning ? 'bg-blue-600 text-white shadow-lg scale-110' : 'bg-white text-blue-600 hover:bg-blue-50 border border-blue-100 shadow-sm'}`}>
+                      <Camera className="w-5 h-5" />
                     </button>
                   </div>
                 </div>
-              ))
-            )}
-          </div>
-        </section>
-      </main>
 
-      {/* Notifications Layer */}
-      <div className="fixed bottom-24 left-4 right-4 md:bottom-8 md:right-8 md:left-auto md:max-w-md flex flex-col gap-2 z-50">
-        {/* Error/Duplicate Toast */}
-        {error && (
-          <div className={`w-full ${error.includes('ডুপ্লিকেট') ? 'bg-amber-500' : 'bg-red-600'} text-white p-4 rounded-xl shadow-2xl flex items-start gap-3 animate-in slide-in-from-bottom-4 border border-white/20`}>
-            {error.includes('ডুপ্লিকেট') ? <AlertTriangle className="w-6 h-6 flex-shrink-0" /> : <AlertCircle className="w-6 h-6 flex-shrink-0" />}
-            <div className="flex-1">
-              <h4 className="font-bold text-sm mb-1">সতর্কতা/ত্রুটি</h4>
-              <p className="text-sm font-medium opacity-90 leading-tight">{error}</p>
-            </div>
-            <button onClick={() => setError(null)} className="p-1 hover:bg-white/20 rounded-md transition-colors">
-              <X className="w-5 h-5" />
-            </button>
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Unique Serial</label>
+                  <div className="relative flex items-center group">
+                    <div className="absolute left-5 text-slate-400 group-focus-within:text-blue-500 transition-colors">
+                      <ScanLine className="w-5 h-5" />
+                    </div>
+                    <input 
+                      type="text" readOnly placeholder="Scan serial..." value={session.uniqueCode || ''}
+                      className={`w-full pl-14 pr-16 py-5 bg-slate-50 border-2 rounded-2xl text-lg font-mono focus:outline-none transition-all ${
+                        session.uniqueCode ? 'border-blue-200 bg-blue-50/20' : 'border-slate-100'
+                      }`}
+                    />
+                    <button onClick={() => startScanner(ScanTarget.UNIQUE_CODE)} className={`absolute right-3 p-3.5 rounded-xl transition-all ${activeTarget === ScanTarget.UNIQUE_CODE && isScanning ? 'bg-blue-600 text-white shadow-lg scale-110' : 'bg-white text-blue-600 hover:bg-blue-50 border border-blue-100 shadow-sm'}`}>
+                      <Camera className="w-5 h-5" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <button 
+                onClick={handleSave}
+                disabled={!session.partNumber || !session.uniqueCode || isAnalyzing}
+                className="w-full mt-10 py-5 rounded-2xl bg-slate-900 hover:bg-slate-800 disabled:bg-slate-100 disabled:text-slate-300 text-white font-black text-xl transition-all shadow-xl active:scale-[0.98] flex items-center justify-center gap-4"
+              >
+                {isAnalyzing ? <><Loader2 className="w-6 h-6 animate-spin" />Saving...</> : <><CheckCircle2 className="w-7 h-7" />Save Record</>}
+              </button>
+            </section>
           </div>
         )}
 
-        {/* Success Toast */}
+        {/* VIEW 2: HISTORY */}
+        {currentView === 'history' && (
+          <section className="space-y-4 animate-in fade-in slide-in-from-right-4 duration-500 pb-12">
+            <div className="flex items-center justify-between px-2">
+              <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                <Database className="w-5 h-5 text-slate-500" />
+                Cloud History
+              </h3>
+              <div className="flex items-center gap-2">
+                <button 
+                  onClick={fetchRecords}
+                  className="p-2.5 text-slate-500 hover:text-blue-600 transition-colors bg-white border border-slate-200 rounded-xl shadow-sm"
+                  title="Refresh"
+                >
+                  <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
+                </button>
+                <button 
+                  onClick={exportToExcel}
+                  disabled={records.length === 0}
+                  className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white px-4 py-2 rounded-xl font-bold transition-all shadow-md active:scale-95 text-sm"
+                >
+                  <FileSpreadsheet className="w-4 h-4" />
+                  Export Excel
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 gap-4">
+              {records.length === 0 && !isLoading ? (
+                <div className="bg-white border-2 border-dashed border-slate-200 rounded-3xl p-16 text-center">
+                  <div className="bg-slate-50 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4"><Package className="w-8 h-8 text-slate-300" /></div>
+                  <p className="text-slate-400 text-sm font-bold uppercase tracking-widest">No Cloud Data</p>
+                </div>
+              ) : (
+                records.map((record) => (
+                  <div key={record.id} className="bg-white border border-slate-200 rounded-3xl p-5 shadow-sm hover:shadow-lg transition-all group relative border-l-4 border-l-blue-500">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-6">
+                      <div className="space-y-4 flex-1">
+                        <div className="flex items-center gap-6 flex-wrap">
+                          <div className="flex flex-col">
+                             <span className="text-[9px] text-slate-400 font-black uppercase tracking-widest mb-1">Part Code</span>
+                             <span className="font-mono text-slate-800 font-bold text-base bg-slate-50 px-2 py-1 rounded-md">{record.partNumber}</span>
+                          </div>
+                          <div className="flex flex-col">
+                             <span className="text-[9px] text-slate-400 font-black uppercase tracking-widest mb-1">Serial</span>
+                             <span className="font-mono text-blue-700 font-bold text-base bg-blue-50 px-2 py-1 rounded-md">{record.uniqueCode}</span>
+                          </div>
+                          <div className="ml-auto text-right">
+                             <span className="text-[10px] text-slate-400 font-bold bg-slate-100 px-2 py-1 rounded-md">
+                              {new Date(record.timestamp).toLocaleString([], { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' })}
+                             </span>
+                          </div>
+                        </div>
+                        {record.analysis && (
+                          <div className="bg-slate-50/80 p-4 rounded-2xl border border-slate-100"><p className="text-slate-600 text-xs leading-relaxed font-medium">{record.analysis}</p></div>
+                        )}
+                      </div>
+                      <button onClick={() => { if(confirm('মুছে ফেলবেন?')) deleteRecord(record.id) }} className="text-slate-300 hover:text-red-500 p-2 transition-colors sm:opacity-0 group-hover:opacity-100 bg-slate-50 rounded-full hover:bg-red-50"><Trash2 className="w-5 h-5" /></button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </section>
+        )}
+      </main>
+
+      {/* Bottom Navigation Bar */}
+      <nav className="fixed bottom-0 left-0 right-0 bg-white/80 backdrop-blur-lg border-t border-slate-200 z-50 px-6 pb-6 pt-3 flex items-center justify-around shadow-[0_-10px_30px_rgba(0,0,0,0.03)]">
+        <button 
+          onClick={() => setCurrentView('scan')}
+          className={`flex flex-col items-center gap-1 transition-all ${currentView === 'scan' ? 'text-blue-600 scale-110' : 'text-slate-400 hover:text-slate-600'}`}
+        >
+          <div className={`p-2 rounded-xl ${currentView === 'scan' ? 'bg-blue-50' : ''}`}>
+            <Scan className="w-6 h-6" />
+          </div>
+          <span className="text-[10px] font-black uppercase tracking-wider">Scan</span>
+        </button>
+
+        <button 
+          onClick={() => setCurrentView('history')}
+          className={`flex flex-col items-center gap-1 transition-all ${currentView === 'history' ? 'text-blue-600 scale-110' : 'text-slate-400 hover:text-slate-600'}`}
+        >
+          <div className={`p-2 rounded-xl ${currentView === 'history' ? 'bg-blue-50' : ''}`}>
+            <History className="w-6 h-6" />
+          </div>
+          <span className="text-[10px] font-black uppercase tracking-wider">History</span>
+        </button>
+      </nav>
+
+      {/* Notifications Layer */}
+      <div className="fixed bottom-28 left-4 right-4 md:bottom-20 md:right-8 md:left-auto md:max-w-sm flex flex-col gap-3 z-50">
+        {error && (
+          <div className={`w-full ${error.includes('ডুপ্লিকেট') ? 'bg-amber-500' : 'bg-rose-600'} text-white p-4 rounded-2xl shadow-2xl flex items-start gap-3 animate-in slide-in-from-bottom-6 border border-white/20`}>
+            <AlertCircle className="w-6 h-6 flex-shrink-0" />
+            <div className="flex-1">
+              <h4 className="font-bold text-sm mb-1 uppercase tracking-wider">Alert</h4>
+              <p className="text-sm font-medium opacity-90 leading-tight">{error}</p>
+            </div>
+            <button onClick={() => setError(null)} className="p-1 hover:bg-white/20 rounded-lg"><X className="w-5 h-5" /></button>
+          </div>
+        )}
         {success && (
-          <div className="w-full bg-emerald-600 text-white p-4 rounded-xl shadow-2xl flex items-center gap-3 animate-in slide-in-from-bottom-4 border border-white/20">
+          <div className="w-full bg-emerald-600 text-white p-4 rounded-2xl shadow-2xl flex items-center gap-3 animate-in slide-in-from-bottom-6 border border-white/20">
             <CheckCircle className="w-6 h-6 flex-shrink-0" />
-            <p className="text-sm font-bold">{success}</p>
-            <button onClick={() => setSuccess(null)} className="ml-auto p-1 hover:bg-white/20 rounded-md">
-              <X className="w-4 h-4" />
-            </button>
+            <p className="text-sm font-black tracking-wide">{success}</p>
+            <button onClick={() => setSuccess(null)} className="ml-auto p-1 hover:bg-white/20 rounded-lg"><X className="w-4 h-4" /></button>
           </div>
         )}
       </div>

@@ -1,6 +1,6 @@
 {
-  "name": "ScanPair: Dual QR Workflow",
-  "description": "A streamlined QR code scanner designed to pair part numbers with unique serial codes, providing real-time validation and Excel export capabilities.",
+  "name": "XtraPro Scanner",
+  "description": "A professional-grade dual QR code scanner designed to pair part numbers with unique serial codes, providing real-time cloud validation and Excel export capabilities.",
   "requestFramePermissions": [
     "camera"
   ]
