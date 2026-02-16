@@ -14,17 +14,15 @@ import {
   Loader2,
   RefreshCw,
   ScanLine,
-  AlertTriangle,
   CheckCircle,
-  Database,
   Scan,
   ChevronRight
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
-import { ScannedRecord, ScanSession, ScanTarget } from './types';
-import { ScannerOverlay } from './components/ScannerOverlay';
-import { analyzeScanPair } from './services/geminiService';
-import { supabase } from './services/supabaseClient';
+import { ScannedRecord, ScanSession, ScanTarget } from './types.ts';
+import { ScannerOverlay } from './components/ScannerOverlay.tsx';
+import { analyzeScanPair } from './services/geminiService.ts';
+import { supabase } from './services/supabaseClient.ts';
 
 const SCANNER_ID = "qr-reader";
 
@@ -46,12 +44,12 @@ const App: React.FC = () => {
   const fetchRecords = useCallback(async () => {
     setIsLoading(true);
     try {
-      const { data, error } = await supabase
+      const { data, error: fetchErr } = await supabase
         .from('scanned_records')
         .select('*')
         .order('timestamp', { ascending: false });
 
-      if (error) throw error;
+      if (fetchErr) throw fetchErr;
       
       const mappedData: ScannedRecord[] = (data || []).map(item => ({
         id: item.id,
@@ -251,7 +249,6 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-screen pb-24 flex flex-col font-sans bg-slate-50">
-      {/* Header */}
       <header className="bg-white/90 backdrop-blur-md border-b border-slate-200 px-4 py-3 sticky top-0 z-30 shadow-sm">
         <div className="max-w-3xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -260,7 +257,6 @@ const App: React.FC = () => {
             </div>
             <h1 className="font-extrabold text-lg tracking-tight text-slate-800">XtraPro</h1>
           </div>
-          
           <div className="flex items-center gap-2">
              <div className="flex items-center gap-1.5 bg-slate-100 px-2.5 py-1 rounded-full border border-slate-200">
                 <div className={`w-1.5 h-1.5 rounded-full ${records.length > 0 ? 'bg-emerald-500' : 'bg-slate-300'}`} />
@@ -273,35 +269,25 @@ const App: React.FC = () => {
       </header>
 
       <main className="flex-1 max-w-3xl mx-auto w-full p-4">
-        
-        {/* VIEW 1: SCANNING */}
         {currentView === 'scan' && (
           <div className="animate-in fade-in duration-300 space-y-6">
-            {/* Active Scan Area */}
             {isScanning && (
               <section className="bg-slate-900 rounded-2xl overflow-hidden shadow-xl relative aspect-square max-w-[280px] mx-auto w-full mb-4 border-2 border-white">
                 <div id={SCANNER_ID} className="w-full h-full bg-black"></div>
                 <ScannerOverlay activeTarget={activeTarget} isScanning={isScanning} />
-                <button 
-                  onClick={stopScanner}
-                  className="absolute top-3 right-3 bg-black/40 hover:bg-black/60 backdrop-blur-md text-white p-1.5 rounded-full z-20"
-                >
+                <button onClick={stopScanner} className="absolute top-3 right-3 bg-black/40 hover:bg-black/60 backdrop-blur-md text-white p-1.5 rounded-full z-20">
                   <X className="w-5 h-5" />
                 </button>
               </section>
             )}
 
-            {/* Pairing Interface - Restored to Large Size */}
             <section className="bg-white border border-slate-200 rounded-3xl shadow-sm p-6 sm:p-8">
               <div className="flex items-center justify-between gap-4 mb-8">
                 <h2 className="text-sm font-black text-slate-800 uppercase tracking-widest flex items-center gap-2.5">
                   <Scan className="w-5 h-5 text-blue-600" />
                   Scanner Input
                 </h2>
-                <button 
-                  onClick={handleResetSession}
-                  className="text-slate-400 hover:text-red-500 flex items-center gap-1 text-[10px] font-black tracking-widest uppercase transition-colors"
-                >
+                <button onClick={handleResetSession} className="text-slate-400 hover:text-red-500 flex items-center gap-1 text-[10px] font-black tracking-widest uppercase transition-colors">
                   <Trash2 className="w-3.5 h-3.5" />
                   Clear
                 </button>
@@ -356,37 +342,23 @@ const App: React.FC = () => {
           </div>
         )}
 
-        {/* VIEW 2: HISTORY - Slimmed Down with SL No. */}
         {currentView === 'history' && (
           <section className="space-y-4 animate-in fade-in slide-in-from-right-2 duration-300 pb-12">
             <div className="flex items-center justify-between px-1">
               <div className="flex items-center gap-2">
-                <h3 className="text-xs font-black text-slate-500 uppercase tracking-[0.2em]">
-                  Recent Activity
-                </h3>
-                <span className="bg-slate-200 text-slate-600 text-[10px] font-bold px-1.5 py-0.5 rounded-md">
-                  {records.length}
-                </span>
+                <h3 className="text-xs font-black text-slate-500 uppercase tracking-[0.2em]">Recent Activity</h3>
+                <span className="bg-slate-200 text-slate-600 text-[10px] font-bold px-1.5 py-0.5 rounded-md">{records.length}</span>
               </div>
               <div className="flex items-center gap-1.5">
-                <button 
-                  onClick={fetchRecords}
-                  className="p-1.5 text-slate-500 hover:text-blue-600 bg-white border border-slate-200 rounded-lg shadow-sm"
-                  title="Refresh"
-                >
+                <button onClick={fetchRecords} className="p-1.5 text-slate-500 hover:text-blue-600 bg-white border border-slate-200 rounded-lg shadow-sm">
                   <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
                 </button>
-                <button 
-                  onClick={exportToExcel}
-                  disabled={records.length === 0}
-                  className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white px-3 py-1.5 rounded-lg font-bold transition-all shadow-sm text-[11px] uppercase tracking-wider"
-                >
+                <button onClick={exportToExcel} disabled={records.length === 0} className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white px-3 py-1.5 rounded-lg font-bold transition-all shadow-sm text-[11px] uppercase tracking-wider">
                   <FileSpreadsheet className="w-3.5 h-3.5" />
                   Excel
                 </button>
               </div>
             </div>
-
             <div className="flex flex-col gap-2">
               {records.length === 0 && !isLoading ? (
                 <div className="bg-white border-2 border-dashed border-slate-200 rounded-2xl p-10 text-center">
@@ -396,11 +368,9 @@ const App: React.FC = () => {
                 records.map((record, index) => (
                   <div key={record.id} className="bg-white border border-slate-200 rounded-xl px-3 py-2.5 shadow-sm hover:border-blue-200 transition-colors group">
                     <div className="flex items-center justify-between gap-3">
-                      {/* SL No. Badge */}
                       <div className="shrink-0 w-5 h-5 flex items-center justify-center bg-slate-100 rounded-md">
                         <span className="text-[10px] font-black text-slate-400">{index + 1}</span>
                       </div>
-
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 mb-0.5">
                            <div className="flex items-center gap-1 min-w-0">
@@ -424,10 +394,7 @@ const App: React.FC = () => {
                           )}
                         </div>
                       </div>
-                      <button 
-                        onClick={() => { if(confirm('Delete record?')) deleteRecord(record.id) }} 
-                        className="text-slate-300 hover:text-red-500 p-1 opacity-0 group-hover:opacity-100 transition-opacity"
-                      >
+                      <button onClick={() => { if(confirm('Delete record?')) deleteRecord(record.id) }} className="text-slate-300 hover:text-red-500 p-1 opacity-0 group-hover:opacity-100 transition-opacity">
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
                     </div>
@@ -439,37 +406,22 @@ const App: React.FC = () => {
         )}
       </main>
 
-      {/* Bottom Navigation Bar */}
       <nav className="fixed bottom-0 left-0 right-0 bg-white/90 backdrop-blur-xl border-t border-slate-200 z-50 px-8 pb-6 pt-3 flex items-center justify-around shadow-lg">
-        <button 
-          onClick={() => setCurrentView('scan')}
-          className={`flex flex-col items-center gap-1 transition-all ${currentView === 'scan' ? 'text-blue-600' : 'text-slate-400'}`}
-        >
-          <div className={`p-2 rounded-xl transition-colors ${currentView === 'scan' ? 'bg-blue-50' : ''}`}>
-            <Scan className="w-5 h-5" />
-          </div>
+        <button onClick={() => setCurrentView('scan')} className={`flex flex-col items-center gap-1 transition-all ${currentView === 'scan' ? 'text-blue-600' : 'text-slate-400'}`}>
+          <div className={`p-2 rounded-xl transition-colors ${currentView === 'scan' ? 'bg-blue-50' : ''}`}><Scan className="w-5 h-5" /></div>
           <span className="text-[9px] font-black uppercase tracking-[0.15em]">Scan</span>
         </button>
-
-        <button 
-          onClick={() => setCurrentView('history')}
-          className={`flex flex-col items-center gap-1 transition-all ${currentView === 'history' ? 'text-blue-600' : 'text-slate-400'}`}
-        >
-          <div className={`p-2 rounded-xl transition-colors ${currentView === 'history' ? 'bg-blue-50' : ''}`}>
-            <History className="w-5 h-5" />
-          </div>
+        <button onClick={() => setCurrentView('history')} className={`flex flex-col items-center gap-1 transition-all ${currentView === 'history' ? 'text-blue-600' : 'text-slate-400'}`}>
+          <div className={`p-2 rounded-xl transition-colors ${currentView === 'history' ? 'bg-blue-50' : ''}`}><History className="w-5 h-5" /></div>
           <span className="text-[9px] font-black uppercase tracking-[0.15em]">History</span>
         </button>
       </nav>
 
-      {/* Notifications Layer */}
       <div className="fixed bottom-24 left-4 right-4 md:right-8 md:left-auto md:max-w-sm flex flex-col gap-2 z-50">
         {error && (
           <div className={`w-full ${error.includes('ডুপ্লিকেট') ? 'bg-amber-500' : 'bg-rose-600'} text-white p-3.5 rounded-xl shadow-xl flex items-start gap-3 animate-in slide-in-from-bottom-4 border border-white/10`}>
             <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
-            <div className="flex-1 min-w-0">
-              <p className="text-xs font-bold leading-tight">{error}</p>
-            </div>
+            <div className="flex-1 min-w-0"><p className="text-xs font-bold leading-tight">{error}</p></div>
             <button onClick={() => setError(null)} className="p-1 hover:bg-white/20 rounded-lg"><X className="w-4 h-4" /></button>
           </div>
         )}
