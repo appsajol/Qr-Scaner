@@ -6,6 +6,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>XtraPro Scanner - QR Pairing System</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      // Prevent crash if process.env is accessed before injection
+      if (typeof window.process === 'undefined') {
+        window.process = { env: {} };
+      }
+    </script>
 <script type="importmap">
 {
   "imports": {

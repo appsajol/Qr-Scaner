@@ -1,10 +1,11 @@
 
-import { GoogleGenAI, Type } from "@google/genai";
-
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+import { GoogleGenAI } from "@google/genai";
 
 export const analyzeScanPair = async (partNumber: string, uniqueCode: string) => {
   try {
+    // Initialize inside the call to prevent top-level crashes if process.env is temporarily unavailable
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || "" });
+    
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
       contents: `Analyze this manufacturing scan pair:
