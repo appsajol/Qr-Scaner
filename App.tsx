@@ -38,6 +38,7 @@ const App: React.FC = () => {
   const [success, setSuccess] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [isTransitioning, setIsTransitioning] = useState(false);
   
   const scannerRef = useRef<Html5Qrcode | null>(null);
 
@@ -97,99 +98,91 @@ const App: React.FC = () => {
   }, []);
 
   const startScanner = useCallback(async (target: ScanTarget) => {
+    if (isTransitioning) return;
+    
     setError(null);
-    await stopScanner();
+    setIsTransitioning(true);
     
-    setActiveTarget(target);
-    setIsScanning(true);
-    
-    setTimeout(async () => {
+    try {
+      await stopScanner();
+      
+      setActiveTarget(target);
+      setIsScanning(true);
+      
+      // Wait for the container to be rendered in the DOM
+      await new Promise(r => setTimeout(r, 400));
+      
       const container = document.getElementById(SCANNER_ID);
       if (!container) {
-        setIsScanning(false);
-        setError("Scanner area loading error.");
-        return;
+        throw new Error("Scanner container not found");
       }
 
+      const scanner = new Html5Qrcode(SCANNER_ID);
+      scannerRef.current = scanner;
+      
+      // Attempt to find the back camera
+      let backCameraId = "";
       try {
-        const scanner = new Html5Qrcode(SCANNER_ID);
-        scannerRef.current = scanner;
-        
-        // Correcting the config for small QR codes
-        const config = { 
-          fps: 25,
-          qrbox: (viewfinderWidth: number, viewfinderHeight: number) => {
-            const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
-            const boxSize = Math.floor(minEdge * 0.75);
-            return { width: boxSize, height: boxSize };
-          },
-          aspectRatio: 1.0,
-          experimentalFeatures: {
-            useBarCodeDetectorIfSupported: true
-          },
-          // Resolution hints are passed here in some versions, but mostly 
-          // we rely on the library to pick the best stream for the chosen facingMode.
-          videoConstraints: {
-             width: { ideal: 1280 },
-             height: { ideal: 720 }
-          }
-        };
-        
-        // FIX: The first argument must have EXACTLY 1 KEY if passed as an object
-        const cameraConfig = { facingMode: "environment" };
-
-        await scanner.start(
-          cameraConfig,
-          config,
-          (decodedText) => {
-            const cleaned = decodedText.trim();
-            setSession(prev => ({ ...prev, [target]: cleaned }));
-            stopScanner();
-          },
-          () => {} 
-        );
-      } catch (err: any) {
-        console.error("Camera Initial Attempt Error:", err);
-        
-        // Before fallback, completely clear the state to avoid transition errors
-        if (scannerRef.current) {
-           try { await scannerRef.current.clear(); } catch(e) {}
+        const cameras = await Html5Qrcode.getCameras();
+        if (cameras && cameras.length > 0) {
+          const backCamera = cameras.find(c => 
+            c.label.toLowerCase().includes('back') || 
+            c.label.toLowerCase().includes('rear') ||
+            c.label.toLowerCase().includes('environment')
+          );
+          backCameraId = backCamera ? backCamera.id : cameras[cameras.length - 1].id;
         }
-        
-        // Wait a small frame to ensure DOM and camera driver are ready for a new attempt
-        await new Promise(r => setTimeout(r, 500));
-
-        try {
-          if (scannerRef.current) {
-            await scannerRef.current.start(
-              { facingMode: "environment" },
-              { fps: 15, qrbox: { width: 250, height: 250 } },
-              (decodedText) => {
-                const cleaned = decodedText.trim();
-                setSession(prev => ({ ...prev, [target]: cleaned }));
-                stopScanner();
-              },
-              () => {}
-            );
-          }
-        } catch (fallbackErr: any) {
-          console.error("Camera Fallback Error:", fallbackErr);
-          let msg = "ক্যামেরা এক্সেস করা যায়নি।";
-          
-          if (fallbackErr.name === 'NotAllowedError' || fallbackErr.message?.includes('Permission')) {
-            msg = "ক্যামেরা পারমিশন দেওয়া হয়নি। ব্রাউজার সেটিং থেকে ক্যামেরা এলাউ করুন।";
-          } else if (fallbackErr.name === 'NotFoundError') {
-            msg = "আপনার ডিভাইসে কোনো ক্যামেরা খুঁজে পাওয়া যায়নি।";
-          } else if (fallbackErr.name === 'NotReadableError') {
-            msg = "ক্যামেরা অন্য কোনো অ্যাপে ব্যবহৃত হচ্ছে।";
-          }
-          
-          setError(msg);
-          setIsScanning(false);
-        }
+      } catch (e) {
+        console.warn("Error enumerating cameras:", e);
       }
-    }, 400); // Increased delay for stability
-  }, [stopScanner]);
+
+      const config = { 
+        fps: 20,
+        qrbox: (viewfinderWidth: number, viewfinderHeight: number) => {
+          const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
+          const boxSize = Math.floor(minEdge * 0.75);
+          return { width: boxSize, height: boxSize };
+        },
+        aspectRatio: 1.0,
+        experimentalFeatures: {
+          useBarCodeDetectorIfSupported: true
+        }
+      };
+      
+      const cameraIdOrConfig = backCameraId ? backCameraId : { facingMode: "environment" };
+
+      await scanner.start(
+        cameraIdOrConfig,
+        config,
+        (decodedText) => {
+          const cleaned = decodedText.trim();
+          setSession(prev => ({ ...prev, [target]: cleaned }));
+          stopScanner();
+        },
+        () => {} 
+      );
+    } catch (err: any) {
+      console.error("Scanner Error:", err);
+      
+      if (err.name === 'AbortError' || err.message?.includes('aborted')) {
+        // Silently ignore or retry once
+        console.warn("Operation aborted, common on rapid switching.");
+      } else {
+        let msg = "ক্যামেরা এক্সেস করা যায়নি।";
+        if (err.name === 'NotAllowedError' || err.message?.includes('Permission')) {
+          msg = "ক্যামেরা পারমিশন দেওয়া হয়নি। ব্রাউজার সেটিং থেকে ক্যামেরা এলাউ করুন।";
+        } else if (err.name === 'NotReadableError') {
+          msg = "ক্যামেরা অন্য কোনো অ্যাপে ব্যবহৃত হচ্ছে।";
+        }
+        setError(msg);
+      }
+      
+      setIsScanning(false);
+      await stopScanner();
+    } finally {
+      setIsTransitioning(false);
+    }
+  }, [stopScanner, isTransitioning]);
 
   const generateId = () => {
     try {
@@ -354,7 +347,8 @@ const App: React.FC = () => {
                 {isScanning && (
                   <button 
                     onClick={stopScanner}
-                    className="absolute top-4 right-4 z-20 w-10 h-10 bg-black/50 backdrop-blur-md rounded-full flex items-center justify-center text-white hover:bg-black/70 transition-colors border border-white/10"
+                    disabled={isTransitioning}
+                    className="absolute top-4 right-4 z-20 w-10 h-10 bg-black/50 backdrop-blur-md rounded-full flex items-center justify-center text-white hover:bg-black/70 transition-colors border border-white/10 disabled:opacity-50"
                   >
                     <X className="w-5 h-5" />
                   </button>
@@ -365,13 +359,14 @@ const App: React.FC = () => {
                 <div className="grid grid-cols-2 gap-3">
                   <button
                     onClick={() => startScanner(ScanTarget.PART_NUMBER)}
+                    disabled={isTransitioning || isAnalyzing}
                     className={`flex flex-col items-center justify-center p-4 rounded-2xl border-2 transition-all ${
                       session.partNumber 
                         ? 'border-emerald-500/50 bg-emerald-500/5 text-emerald-400' 
                         : activeTarget === ScanTarget.PART_NUMBER && isScanning
                           ? 'border-blue-500 bg-blue-500/10 text-blue-400 animate-pulse'
                           : 'border-slate-800 bg-slate-800/50 text-slate-400 hover:border-slate-700'
-                    }`}
+                    } disabled:opacity-50`}
                   >
                     <div className="w-10 h-10 rounded-full bg-current/10 flex items-center justify-center mb-2">
                       {session.partNumber ? <CheckCircle className="w-5 h-5" /> : <Package className="w-5 h-5" />}
@@ -384,13 +379,14 @@ const App: React.FC = () => {
 
                   <button
                     onClick={() => startScanner(ScanTarget.UNIQUE_CODE)}
+                    disabled={isTransitioning || isAnalyzing}
                     className={`flex flex-col items-center justify-center p-4 rounded-2xl border-2 transition-all ${
                       session.uniqueCode 
                         ? 'border-emerald-500/50 bg-emerald-500/5 text-emerald-400' 
                         : activeTarget === ScanTarget.UNIQUE_CODE && isScanning
                           ? 'border-blue-500 bg-blue-500/10 text-blue-400 animate-pulse'
                           : 'border-slate-800 bg-slate-800/50 text-slate-400 hover:border-slate-700'
-                    }`}
+                    } disabled:opacity-50`}
                   >
                     <div className="w-10 h-10 rounded-full bg-current/10 flex items-center justify-center mb-2">
                       {session.uniqueCode ? <CheckCircle className="w-5 h-5" /> : <Hash className="w-5 h-5" />}
@@ -404,7 +400,7 @@ const App: React.FC = () => {
 
                 <button
                   onClick={handleSave}
-                  disabled={!session.partNumber || !session.uniqueCode || isAnalyzing}
+                  disabled={!session.partNumber || !session.uniqueCode || isAnalyzing || isTransitioning}
                   className="w-full py-4 px-6 bg-blue-600 hover:bg-blue-500 disabled:opacity-30 disabled:grayscale rounded-2xl font-black text-white shadow-xl shadow-blue-900/20 transition-all flex items-center justify-center gap-3 active:scale-[0.98] uppercase tracking-widest text-sm"
                 >
                   {isAnalyzing ? (
@@ -432,7 +428,11 @@ const App: React.FC = () => {
                   <p className="opacity-50">Secure Validation</p>
                 </div>
               </div>
-              <button onClick={() => setSession({partNumber: null, uniqueCode: null})} className="text-[10px] font-black uppercase text-slate-500 hover:text-red-400 transition-colors">
+              <button 
+                onClick={() => setSession({partNumber: null, uniqueCode: null})} 
+                disabled={isTransitioning || isAnalyzing}
+                className="text-[10px] font-black uppercase text-slate-500 hover:text-red-400 transition-colors disabled:opacity-30"
+              >
                 Reset
               </button>
             </div>
@@ -504,11 +504,11 @@ const App: React.FC = () => {
       </main>
       
       <nav className="fixed bottom-0 left-0 right-0 bg-slate-900/90 backdrop-blur-xl border-t border-slate-800 z-50 px-10 pb-8 pt-4 flex items-center justify-around">
-        <button onClick={() => setCurrentView('scan')} className={`flex flex-col items-center gap-1.5 transition-all ${currentView === 'scan' ? 'text-blue-500' : 'text-slate-500'}`}>
+        <button onClick={() => setCurrentView('scan')} disabled={isTransitioning} className={`flex flex-col items-center gap-1.5 transition-all ${currentView === 'scan' ? 'text-blue-500' : 'text-slate-500'} disabled:opacity-30`}>
           <Scan className="w-6 h-6" />
           <span className="text-[9px] font-black uppercase tracking-[0.2em]">Scanner</span>
         </button>
-        <button onClick={() => setCurrentView('history')} className={`flex flex-col items-center gap-1.5 transition-all ${currentView === 'history' ? 'text-blue-500' : 'text-slate-500'}`}>
+        <button onClick={() => setCurrentView('history')} disabled={isTransitioning} className={`flex flex-col items-center gap-1.5 transition-all ${currentView === 'history' ? 'text-blue-500' : 'text-slate-500'} disabled:opacity-30`}>
           <History className="w-6 h-6" />
           <span className="text-[9px] font-black uppercase tracking-[0.2em]">Records</span>
         </button>
