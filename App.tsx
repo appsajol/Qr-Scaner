@@ -81,38 +81,45 @@ const App: React.FC = () => {
   }, [success]);
 
   const stopScanner = useCallback(async () => {
-    if (scannerRef.current && scannerRef.current.isScanning) {
+    if (scannerRef.current) {
       try {
-        await scannerRef.current.stop();
-        scannerRef.current.clear();
+        if (scannerRef.current.isScanning) {
+          await scannerRef.current.stop();
+        }
+        await scannerRef.current.clear();
       } catch (e) {
-        console.warn("Error stopping scanner:", e);
+        console.warn("Cleanup error:", e);
+      } finally {
+        scannerRef.current = null;
+        setIsScanning(false);
       }
-      setIsScanning(false);
     }
   }, []);
 
   const startScanner = useCallback(async (target: ScanTarget) => {
-    await stopScanner();
-    setActiveTarget(target);
     setError(null);
+    await stopScanner();
+    
+    setActiveTarget(target);
     setIsScanning(true);
     
-    // Slight delay to ensure DOM element is ready
     setTimeout(async () => {
+      const container = document.getElementById(SCANNER_ID);
+      if (!container) {
+        setIsScanning(false);
+        setError("Scanner area loading error.");
+        return;
+      }
+
       try {
         const scanner = new Html5Qrcode(SCANNER_ID);
         scannerRef.current = scanner;
         
-        // Optimizing for small QR codes:
-        // 1. Higher FPS (30 instead of 15) for smoother detection.
-        // 2. High resolution constraints (1280x720 ideal) to capture more detail in small codes.
-        // 3. Experimental BarcodeDetector API if available.
         const config = { 
-          fps: 30, 
+          fps: 30,
           qrbox: (viewfinderWidth: number, viewfinderHeight: number) => {
             const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
-            const boxSize = Math.floor(minEdge * 0.7);
+            const boxSize = Math.floor(minEdge * 0.65);
             return { width: boxSize, height: boxSize };
           },
           aspectRatio: 1.0,
@@ -121,37 +128,37 @@ const App: React.FC = () => {
           }
         };
         
+        const constraints: MediaTrackConstraints = { 
+          facingMode: "environment",
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        };
+
         await scanner.start(
-          { 
-            facingMode: "environment",
-            // Requesting high resolution helps with small codes
-            width: { min: 640, ideal: 1280, max: 1920 },
-            height: { min: 480, ideal: 720, max: 1080 }
-          },
+          constraints,
           config,
           (decodedText) => {
             const cleaned = decodedText.trim();
-            setSession(prev => ({
-              ...prev,
-              [target]: cleaned
-            }));
+            setSession(prev => ({ ...prev, [target]: cleaned }));
             stopScanner();
           },
-          () => {} // Ignored for performance
+          () => {} 
         );
-      } catch (err) {
-        console.error("Scanner Error:", err);
-        setError("ক্যামেরা এক্সেস করা যায়নি। ক্যামেরা অনুমতি চেক করুন।");
+      } catch (err: any) {
+        console.error("Camera Error:", err);
+        let msg = "ক্যামেরা এক্সেস করা যায়নি।";
+        if (err.name === 'NotAllowedError') msg = "ক্যামেরা পারমিশন ডিনাইড। ব্রাউজার সেটিং চেক করুন।";
+        else if (err.name === 'NotReadableError') msg = "ক্যামেরা অন্য কোথাও ব্যবহৃত হচ্ছে।";
+        
+        setError(msg);
         setIsScanning(false);
       }
-    }, 150);
+    }, 250);
   }, [stopScanner]);
 
   const generateId = () => {
     try {
-      if (typeof crypto !== 'undefined' && crypto.randomUUID) {
-        return crypto.randomUUID();
-      }
+      if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
       return `id-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     } catch (e) {
       return `id-${Date.now()}`;
@@ -170,7 +177,7 @@ const App: React.FC = () => {
     try {
       const { data: existing } = await supabase
         .from('scanned_records')
-        .select('id, part_number')
+        .select('id')
         .eq('unique_code', session.uniqueCode)
         .maybeSingle();
 
@@ -180,283 +187,292 @@ const App: React.FC = () => {
         return;
       }
 
+      // Fix: Complete the truncated logic for Gemini analysis and Supabase insertion
       const analysis = await analyzeScanPair(session.partNumber, session.uniqueCode);
-      const newRecordId = generateId();
-      const timestamp = new Date().toISOString();
-
-      const { error: insertError } = await supabase
-        .from('scanned_records')
-        .insert([{
-          id: newRecordId,
-          part_number: session.partNumber,
-          unique_code: session.uniqueCode,
-          timestamp: timestamp,
-          analysis: analysis || "Verified"
-        }]);
-
-      if (insertError) {
-        if (insertError.code === '23505') {
-          setError(`ডুপ্লিকেট কোড: ডাটাবেসে রয়েছে।`);
-          return;
-        }
-        throw insertError;
-      }
-
-      const newLocalRecord: ScannedRecord = {
-        id: newRecordId,
-        partNumber: session.partNumber,
-        uniqueCode: session.uniqueCode,
-        timestamp: timestamp,
-        status: 'synced',
-        analysis: analysis || "Verified"
+      
+      const newRecord = {
+        id: generateId(),
+        part_number: session.partNumber,
+        unique_code: session.uniqueCode,
+        timestamp: new Date().toISOString(),
+        analysis
       };
 
-      setRecords(prev => [newLocalRecord, ...prev]);
+      const { error: insertErr } = await supabase
+        .from('scanned_records')
+        .insert([newRecord]);
+
+      if (insertErr) throw insertErr;
+
+      setRecords(prev => [{
+        id: newRecord.id,
+        partNumber: newRecord.part_number,
+        uniqueCode: newRecord.unique_code,
+        timestamp: newRecord.timestamp,
+        status: 'synced' as const,
+        analysis: newRecord.analysis
+      }, ...prev]);
+
       setSession({ partNumber: null, uniqueCode: null });
-      setActiveTarget(ScanTarget.PART_NUMBER);
-      setSuccess("সফলভাবে ক্লাউডে সেভ করা হয়েছে!");
-      
+      setSuccess("ডেটা সফলভাবে সংরক্ষিত হয়েছে।");
     } catch (err) {
-      setError("ডেটা সেভ করতে সমস্যা হয়েছে।");
-      console.error("Save failure:", err);
+      console.error("Save error:", err);
+      setError("ডেটা সংরক্ষণ করতে সমস্যা হয়েছে।");
     } finally {
       setIsAnalyzing(false);
     }
   };
 
-  const handleResetSession = () => {
-    setSession({ partNumber: null, uniqueCode: null });
-    setActiveTarget(ScanTarget.PART_NUMBER);
-    stopScanner();
-    setError(null);
-  };
-
-  const deleteRecord = async (id: string) => {
+  const handleDelete = async (id: string) => {
+    if (!confirm("আপনি কি নিশ্চিতভাবে এই রেকর্ডটি মুছতে চান?")) return;
+    
     try {
-      const { error: deleteError } = await supabase
+      const { error: delErr } = await supabase
         .from('scanned_records')
         .delete()
         .eq('id', id);
 
-      if (deleteError) throw deleteError;
-
+      if (delErr) throw delErr;
       setRecords(prev => prev.filter(r => r.id !== id));
       setSuccess("রেকর্ডটি মুছে ফেলা হয়েছে।");
     } catch (err) {
+      console.error("Delete error:", err);
       setError("রেকর্ড মুছতে সমস্যা হয়েছে।");
     }
   };
 
   const exportToExcel = () => {
-    if (records.length === 0) return;
-    try {
-      const data = records.map(r => ({
-        'Date/Time': new Date(r.timestamp).toLocaleString(),
-        'Part Number': r.partNumber,
-        'Unique Serial': r.uniqueCode,
-        'AI Summary': r.analysis
-      }));
-      const ws = XLSX.utils.json_to_sheet(data);
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, "Records");
-      XLSX.writeFile(wb, `XtraPro_Export_${new Date().toISOString().split('T')[0]}.xlsx`);
-      setSuccess("এক্সেল ফাইল ডাউনলোড শুরু হয়েছে।");
-    } catch (err) {
-      setError("এক্সেল ফাইল তৈরি করা যায়নি।");
-    }
+    const ws = XLSX.utils.json_to_sheet(records.map(r => ({
+      'Part Number': r.partNumber,
+      'Unique Code': r.uniqueCode,
+      'Timestamp': new Date(r.timestamp).toLocaleString(),
+      'Analysis': r.analysis
+    })));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Scans");
+    XLSX.writeFile(wb, `manufacturing_scans_${new Date().toISOString().split('T')[0]}.xlsx`);
   };
 
   return (
-    <div className="min-h-screen pb-24 flex flex-col font-sans bg-slate-50">
-      <header className="bg-white/90 backdrop-blur-md border-b border-slate-200 px-4 py-3 sticky top-0 z-30 shadow-sm">
-        <div className="max-w-3xl mx-auto flex items-center justify-between">
+    <div className="min-h-screen bg-slate-950 text-slate-100 font-sans selection:bg-blue-500/30">
+      <nav className="fixed top-0 left-0 right-0 z-50 bg-slate-900/80 backdrop-blur-xl border-b border-slate-800">
+        <div className="max-w-md mx-auto px-4 h-16 flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <div className="bg-blue-600 p-1.5 rounded-lg">
-              <Package className="text-white w-4 h-4" />
+            <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center shadow-lg shadow-blue-900/20">
+              <ScanLine className="w-5 h-5 text-white" />
             </div>
-            <h1 className="font-extrabold text-lg tracking-tight text-slate-800">XtraPro</h1>
+            <h1 className="font-bold text-lg tracking-tight">FactoryScan AI</h1>
           </div>
-          <div className="flex items-center gap-2">
-             <div className="flex items-center gap-1.5 bg-slate-100 px-2.5 py-1 rounded-full border border-slate-200">
-                <div className={`w-1.5 h-1.5 rounded-full ${records.length > 0 ? 'bg-emerald-500' : 'bg-slate-300'}`} />
-                <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">
-                  {isLoading ? 'SYNCING' : 'CLOUD'}
-                </span>
-             </div>
+          <div className="flex bg-slate-800 p-1 rounded-xl">
+            <button 
+              onClick={() => setCurrentView('scan')}
+              className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-all ${currentView === 'scan' ? 'bg-slate-700 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200'}`}
+            >
+              Scan
+            </button>
+            <button 
+              onClick={() => setCurrentView('history')}
+              className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-all ${currentView === 'history' ? 'bg-slate-700 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200'}`}
+            >
+              History
+            </button>
           </div>
         </div>
-      </header>
-
-      <main className="flex-1 max-w-3xl mx-auto w-full p-4">
-        {currentView === 'scan' && (
-          <div className="animate-in fade-in duration-300 space-y-6">
-            {isScanning && (
-              <section className="bg-slate-900 rounded-2xl overflow-hidden shadow-xl relative aspect-square max-w-[320px] mx-auto w-full mb-4 border-2 border-white">
-                <div id={SCANNER_ID} className="w-full h-full bg-black"></div>
-                <ScannerOverlay activeTarget={activeTarget} isScanning={isScanning} />
-                <button onClick={stopScanner} className="absolute top-3 right-3 bg-black/40 hover:bg-black/60 backdrop-blur-md text-white p-1.5 rounded-full z-20">
-                  <X className="w-5 h-5" />
-                </button>
-                <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-white/70 text-[10px] font-bold uppercase tracking-widest bg-black/40 px-3 py-1 rounded-full backdrop-blur-sm z-10 text-center">
-                  Hold close for small codes
-                </div>
-              </section>
-            )}
-
-            <section className="bg-white border border-slate-200 rounded-3xl shadow-sm p-6 sm:p-8">
-              <div className="flex items-center justify-between gap-4 mb-8">
-                <h2 className="text-sm font-black text-slate-800 uppercase tracking-widest flex items-center gap-2.5">
-                  <Scan className="w-5 h-5 text-blue-600" />
-                  Scanner Input
-                </h2>
-                <button onClick={handleResetSession} className="text-slate-400 hover:text-red-500 flex items-center gap-1 text-[10px] font-black tracking-widest uppercase transition-colors">
-                  <Trash2 className="w-3.5 h-3.5" />
-                  Clear
-                </button>
-              </div>
-
-              <div className="space-y-6">
-                <div className="space-y-2">
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Part Number</label>
-                  <div className="relative flex items-center group">
-                    <div className="absolute left-5 text-slate-400 group-focus-within:text-blue-500 transition-colors">
-                      <Hash className="w-5 h-5" />
-                    </div>
-                    <input 
-                      type="text" readOnly placeholder="Scan part..." value={session.partNumber || ''}
-                      className={`w-full pl-14 pr-16 py-5 bg-slate-50 border-2 rounded-2xl text-lg font-mono focus:outline-none transition-all ${
-                        session.partNumber ? 'border-blue-200 bg-blue-50/20' : 'border-slate-100'
-                      }`}
-                    />
-                    <button onClick={() => startScanner(ScanTarget.PART_NUMBER)} className={`absolute right-3 p-3.5 rounded-xl transition-all ${activeTarget === ScanTarget.PART_NUMBER && isScanning ? 'bg-blue-600 text-white shadow-lg' : 'bg-white text-blue-600 border border-slate-100 shadow-sm hover:bg-slate-50'}`}>
-                      <Camera className="w-5 h-5" />
-                    </button>
-                  </div>
-                </div>
-
-                <div className="space-y-2">
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Unique Serial</label>
-                  <div className="relative flex items-center group">
-                    <div className="absolute left-5 text-slate-400 group-focus-within:text-blue-500 transition-colors">
-                      <ScanLine className="w-5 h-5" />
-                    </div>
-                    <input 
-                      type="text" readOnly placeholder="Scan serial..." value={session.uniqueCode || ''}
-                      className={`w-full pl-14 pr-16 py-5 bg-slate-50 border-2 rounded-2xl text-lg font-mono focus:outline-none transition-all ${
-                        session.uniqueCode ? 'border-blue-200 bg-blue-50/20' : 'border-slate-100'
-                      }`}
-                    />
-                    <button onClick={() => startScanner(ScanTarget.UNIQUE_CODE)} className={`absolute right-3 p-3.5 rounded-xl transition-all ${activeTarget === ScanTarget.UNIQUE_CODE && isScanning ? 'bg-blue-600 text-white shadow-lg' : 'bg-white text-blue-600 border border-slate-100 shadow-sm hover:bg-slate-50'}`}>
-                      <Camera className="w-5 h-5" />
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              <button 
-                onClick={handleSave}
-                disabled={!session.partNumber || !session.uniqueCode || isAnalyzing}
-                className="w-full mt-10 py-5 rounded-2xl bg-slate-900 hover:bg-slate-800 disabled:bg-slate-100 disabled:text-slate-300 text-white font-black text-xl transition-all shadow-xl active:scale-[0.98] flex items-center justify-center gap-4"
-              >
-                {isAnalyzing ? <><Loader2 className="w-6 h-6 animate-spin" />Saving...</> : <><CheckCircle2 className="w-7 h-7" />Save Record</>}
-              </button>
-            </section>
-          </div>
-        )}
-
-        {currentView === 'history' && (
-          <section className="space-y-4 animate-in fade-in slide-in-from-right-2 duration-300 pb-12">
-            <div className="flex items-center justify-between px-1">
-              <div className="flex items-center gap-2">
-                <h3 className="text-xs font-black text-slate-500 uppercase tracking-[0.2em]">Recent Activity</h3>
-                <span className="bg-slate-200 text-slate-600 text-[10px] font-bold px-1.5 py-0.5 rounded-md">{records.length}</span>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <button onClick={fetchRecords} className="p-1.5 text-slate-500 hover:text-blue-600 bg-white border border-slate-200 rounded-lg shadow-sm">
-                  <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
-                </button>
-                <button onClick={exportToExcel} disabled={records.length === 0} className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white px-3 py-1.5 rounded-lg font-bold transition-all shadow-sm text-[11px] uppercase tracking-wider">
-                  <FileSpreadsheet className="w-3.5 h-3.5" />
-                  Excel
-                </button>
-              </div>
-            </div>
-            <div className="flex flex-col gap-2">
-              {records.length === 0 && !isLoading ? (
-                <div className="bg-white border-2 border-dashed border-slate-200 rounded-2xl p-10 text-center">
-                  <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest">No Cloud Data</p>
-                </div>
-              ) : (
-                records.map((record, index) => (
-                  <div key={record.id} className="bg-white border border-slate-200 rounded-xl px-3 py-2.5 shadow-sm hover:border-blue-200 transition-colors group">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="shrink-0 w-5 h-5 flex items-center justify-center bg-slate-100 rounded-md">
-                        <span className="text-[10px] font-black text-slate-400">{index + 1}</span>
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 mb-0.5">
-                           <div className="flex items-center gap-1 min-w-0">
-                             <span className="text-[7px] font-black text-slate-400 uppercase tracking-tighter">PT</span>
-                             <span className="font-mono text-slate-800 font-bold text-xs truncate bg-slate-50 px-1 py-0.5 rounded border border-slate-100">{record.partNumber}</span>
-                           </div>
-                           <ChevronRight className="w-2.5 h-2.5 text-slate-300 shrink-0" />
-                           <div className="flex items-center gap-1 min-w-0">
-                             <span className="text-[7px] font-black text-slate-400 uppercase tracking-tighter">SN</span>
-                             <span className="font-mono text-blue-700 font-bold text-xs truncate bg-blue-50 px-1 py-0.5 rounded border border-blue-100/50">{record.uniqueCode}</span>
-                           </div>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <span className="text-[8px] text-slate-400 font-medium">
-                            {new Date(record.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} • {new Date(record.timestamp).toLocaleDateString([], { day: 'numeric', month: 'short' })}
-                          </span>
-                          {record.analysis && (
-                            <span className="text-[8px] text-slate-500 font-medium truncate max-w-[120px] border-l border-slate-200 pl-1.5">
-                              {record.analysis}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                      <button onClick={() => { if(confirm('Delete record?')) deleteRecord(record.id) }} className="text-slate-300 hover:text-red-500 p-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-          </section>
-        )}
-      </main>
-
-      <nav className="fixed bottom-0 left-0 right-0 bg-white/90 backdrop-blur-xl border-t border-slate-200 z-50 px-8 pb-6 pt-3 flex items-center justify-around shadow-lg">
-        <button onClick={() => setCurrentView('scan')} className={`flex flex-col items-center gap-1 transition-all ${currentView === 'scan' ? 'text-blue-600' : 'text-slate-400'}`}>
-          <div className={`p-2 rounded-xl transition-colors ${currentView === 'scan' ? 'bg-blue-50' : ''}`}><Scan className="w-5 h-5" /></div>
-          <span className="text-[9px] font-black uppercase tracking-[0.15em]">Scan</span>
-        </button>
-        <button onClick={() => setCurrentView('history')} className={`flex flex-col items-center gap-1 transition-all ${currentView === 'history' ? 'text-blue-600' : 'text-slate-400'}`}>
-          <div className={`p-2 rounded-xl transition-colors ${currentView === 'history' ? 'bg-blue-50' : ''}`}><History className="w-5 h-5" /></div>
-          <span className="text-[9px] font-black uppercase tracking-[0.15em]">History</span>
-        </button>
       </nav>
 
-      <div className="fixed bottom-24 left-4 right-4 md:right-8 md:left-auto md:max-w-sm flex flex-col gap-2 z-50">
+      <main className="max-w-md mx-auto pt-20 pb-24 px-4">
         {error && (
-          <div className={`w-full ${error.includes('ডুপ্লিকেট') ? 'bg-amber-500' : 'bg-rose-600'} text-white p-3.5 rounded-xl shadow-xl flex items-start gap-3 animate-in slide-in-from-bottom-4 border border-white/10`}>
-            <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
-            <div className="flex-1 min-w-0"><p className="text-xs font-bold leading-tight">{error}</p></div>
-            <button onClick={() => setError(null)} className="p-1 hover:bg-white/20 rounded-lg"><X className="w-4 h-4" /></button>
+          <div className="mb-4 p-4 bg-red-500/10 border border-red-500/20 rounded-2xl flex items-start gap-3 animate-in fade-in slide-in-from-top-2">
+            <AlertCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
+            <div className="flex-1 text-sm text-red-200/90">{error}</div>
+            <button onClick={() => setError(null)} className="text-red-400 hover:text-red-300">
+              <X className="w-4 h-4" />
+            </button>
           </div>
         )}
+
         {success && (
-          <div className="w-full bg-emerald-600 text-white p-3.5 rounded-xl shadow-xl flex items-center gap-3 animate-in slide-in-from-bottom-4 border border-white/10">
-            <CheckCircle className="w-5 h-5 flex-shrink-0" />
-            <p className="text-xs font-bold">{success}</p>
-            <button onClick={() => setSuccess(null)} className="ml-auto p-1 hover:bg-white/20 rounded-lg"><X className="w-3.5 h-3.5" /></button>
+          <div className="mb-4 p-4 bg-emerald-500/10 border border-emerald-500/20 rounded-2xl flex items-center gap-3 animate-in fade-in slide-in-from-top-2">
+            <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+            <div className="text-sm text-emerald-200/90">{success}</div>
           </div>
         )}
-      </div>
+
+        {currentView === 'scan' ? (
+          <div className="space-y-6">
+            <div className="bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden shadow-2xl relative">
+              <div className="aspect-square bg-black relative flex items-center justify-center">
+                {isScanning ? (
+                  <div id={SCANNER_ID} className="w-full h-full object-cover" />
+                ) : (
+                  <div className="flex flex-col items-center gap-4 text-slate-500">
+                    <Camera className="w-16 h-16 stroke-1 opacity-20" />
+                    <p className="text-sm font-medium">Camera Inactive</p>
+                  </div>
+                )}
+                {isScanning && <ScannerOverlay activeTarget={activeTarget} isScanning={isScanning} />}
+                
+                {isScanning && (
+                  <button 
+                    onClick={stopScanner}
+                    className="absolute top-4 right-4 z-20 w-10 h-10 bg-black/50 backdrop-blur-md rounded-full flex items-center justify-center text-white hover:bg-black/70 transition-colors"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                )}
+              </div>
+
+              <div className="p-6 space-y-4">
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    onClick={() => startScanner(ScanTarget.PART_NUMBER)}
+                    className={`flex flex-col items-center justify-center p-4 rounded-2xl border-2 transition-all ${
+                      session.partNumber 
+                        ? 'border-emerald-500/50 bg-emerald-500/5 text-emerald-400' 
+                        : activeTarget === ScanTarget.PART_NUMBER && isScanning
+                          ? 'border-blue-500 bg-blue-500/10 text-blue-400'
+                          : 'border-slate-800 bg-slate-800/50 text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    <div className="w-10 h-10 rounded-full bg-current/10 flex items-center justify-center mb-2">
+                      {session.partNumber ? <CheckCircle className="w-5 h-5" /> : <Package className="w-5 h-5" />}
+                    </div>
+                    <span className="text-[10px] font-black uppercase tracking-widest mb-1">Part No</span>
+                    <span className="text-xs font-mono truncate max-w-full">
+                      {session.partNumber || "Pending..."}
+                    </span>
+                  </button>
+
+                  <button
+                    onClick={() => startScanner(ScanTarget.UNIQUE_CODE)}
+                    className={`flex flex-col items-center justify-center p-4 rounded-2xl border-2 transition-all ${
+                      session.uniqueCode 
+                        ? 'border-emerald-500/50 bg-emerald-500/5 text-emerald-400' 
+                        : activeTarget === ScanTarget.UNIQUE_CODE && isScanning
+                          ? 'border-blue-500 bg-blue-500/10 text-blue-400'
+                          : 'border-slate-800 bg-slate-800/50 text-slate-400 hover:border-slate-700'
+                    }`}
+                  >
+                    <div className="w-10 h-10 rounded-full bg-current/10 flex items-center justify-center mb-2">
+                      {session.uniqueCode ? <CheckCircle className="w-5 h-5" /> : <Hash className="w-5 h-5" />}
+                    </div>
+                    <span className="text-[10px] font-black uppercase tracking-widest mb-1">Serial</span>
+                    <span className="text-xs font-mono truncate max-w-full">
+                      {session.uniqueCode || "Pending..."}
+                    </span>
+                  </button>
+                </div>
+
+                <button
+                  onClick={handleSave}
+                  disabled={!session.partNumber || !session.uniqueCode || isAnalyzing}
+                  className="w-full py-4 px-6 bg-blue-600 hover:bg-blue-500 disabled:opacity-30 disabled:hover:bg-blue-600 rounded-2xl font-bold text-white shadow-xl shadow-blue-900/20 transition-all flex items-center justify-center gap-3 active:scale-[0.98]"
+                >
+                  {isAnalyzing ? (
+                    <>
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                      Analyzing...
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="w-5 h-5" />
+                      Complete Scan Pair
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+
+            <div className="bg-slate-900/50 border border-slate-800/50 rounded-2xl p-4">
+              <div className="flex items-center gap-3 text-slate-400">
+                <div className="w-8 h-8 rounded-full bg-slate-800 flex items-center justify-center">
+                  <RefreshCw className="w-4 h-4" />
+                </div>
+                <div className="text-xs">
+                  <p className="font-semibold text-slate-300">Auto-sync active</p>
+                  <p className="opacity-60">Scans are verified and stored instantly.</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between mb-2">
+              <h2 className="text-xl font-bold flex items-center gap-2">
+                <History className="w-5 h-5 text-blue-400" />
+                Scan Records
+              </h2>
+              <button
+                onClick={exportToExcel}
+                disabled={records.length === 0}
+                className="flex items-center gap-2 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-30 rounded-lg text-xs font-semibold transition-colors border border-slate-700"
+              >
+                <FileSpreadsheet className="w-4 h-4 text-emerald-400" />
+                Export
+              </button>
+            </div>
+
+            {isLoading ? (
+              <div className="flex flex-col items-center justify-center py-20 gap-4 text-slate-500">
+                <Loader2 className="w-8 h-8 animate-spin" />
+                <p className="text-sm">Loading records...</p>
+              </div>
+            ) : records.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-20 gap-4 text-slate-500 border border-dashed border-slate-800 rounded-3xl bg-slate-900/30">
+                <Scan className="w-12 h-12 opacity-10" />
+                <p className="text-sm">No scans recorded yet.</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {records.map((record) => (
+                  <div key={record.id} className="group bg-slate-900 border border-slate-800 rounded-2xl p-4 hover:border-slate-700 transition-all shadow-lg shadow-black/20">
+                    <div className="flex items-start justify-between mb-3">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] font-black uppercase tracking-tighter text-blue-400 bg-blue-500/10 px-1.5 py-0.5 rounded">Part</span>
+                          <span className="font-mono text-sm font-bold">{record.partNumber}</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] font-black uppercase tracking-tighter text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded">Serial</span>
+                          <span className="font-mono text-xs text-slate-300">{record.uniqueCode}</span>
+                        </div>
+                      </div>
+                      <button 
+                        onClick={() => handleDelete(record.id)}
+                        className="p-2 text-slate-600 hover:text-red-400 hover:bg-red-400/10 rounded-xl transition-all"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                    {record.analysis && (
+                      <div className="text-xs text-slate-400 bg-black/20 rounded-xl p-3 border border-slate-800/50 mb-3 leading-relaxed italic">
+                        "{record.analysis}"
+                      </div>
+                    )}
+                    <div className="flex items-center justify-between text-[10px] text-slate-500 font-medium">
+                      <span>{new Date(record.timestamp).toLocaleString()}</span>
+                      <div className="flex items-center gap-1 text-emerald-500">
+                        <CheckCircle2 className="w-3 h-3" />
+                        <span>Verified</span>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </main>
+      
+      {currentView === 'scan' && !isScanning && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 w-max px-4 py-2 bg-slate-800/80 backdrop-blur-md rounded-full border border-slate-700 flex items-center gap-2 shadow-2xl">
+          <ChevronRight className="w-4 h-4 text-blue-400 animate-pulse" />
+          <span className="text-[10px] font-bold text-slate-300 uppercase tracking-widest">Tap a button above to scan</span>
+        </div>
+      )}
     </div>
   );
 };
 
+// Fixed: Added missing default export
 export default App;

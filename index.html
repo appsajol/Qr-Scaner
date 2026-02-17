@@ -3,42 +3,51 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>XtraPro Scanner - QR Pairing System</title>
-    <script src="https://cdn.tailwindcss.com"></script>
     <script>
       // Crucial: Prevent 'process is not defined' errors during module loading
-      window.process = window.process || { env: {} };
+      window.process = { env: { NODE_ENV: 'production' } };
       
-      // Global error handler to debug deployment issues
+      // Global error handler to catch initialization failures
       window.onerror = function(message, source, lineno, colno, error) {
-        console.error('Global Error Detected:', message, 'at', source, ':', lineno);
+        const root = document.getElementById('root');
+        if (root && root.innerText.includes('Initializing')) {
+          root.innerHTML = `
+            <div style="padding: 40px; text-align: center; font-family: sans-serif;">
+              <h1 style="color: #e11d48; font-size: 20px; font-weight: 800;">System Error</h1>
+              <p style="color: #64748b; font-size: 14px; margin-top: 8px;">${message}</p>
+              <button onclick="location.reload()" style="margin-top: 20px; padding: 10px 20px; background: #0f172a; color: white; border: none; border-radius: 8px; font-weight: 600;">Retry Load</button>
+            </div>
+          `;
+        }
         return false;
       };
     </script>
+    <script src="https://cdn.tailwindcss.com"></script>
 <script type="importmap">
 {
   "imports": {
     "@google/genai": "https://esm.sh/@google/genai@^1.41.0",
     "react": "https://esm.sh/react@^19.2.4",
-    "react/": "https://esm.sh/react@^19.2.4/",
-    "xlsx": "https://esm.sh/xlsx@^0.18.5",
     "react-dom": "https://esm.sh/react-dom@^19.2.4",
-    "react-dom/": "https://esm.sh/react-dom@^19.2.4/",
+    "react-dom/client": "https://esm.sh/react-dom@^19.2.4/client",
+    "xlsx": "https://esm.sh/xlsx@^0.18.5",
     "lucide-react": "https://esm.sh/lucide-react@^0.564.0",
     "html5-qrcode": "https://esm.sh/html5-qrcode@^2.3.8",
-    "@supabase/supabase-js": "https://esm.sh/@supabase/supabase-js@2.45.4"
+    "@supabase/supabase-js": "https://esm.sh/@supabase/supabase-js@2.45.4",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.4/",
+    "react/": "https://esm.sh/react@^19.2.4/"
   }
 }
 </script>
 </head>
-<body class="bg-slate-50 text-slate-900">
+<body class="bg-slate-50 text-slate-900 antialiased overflow-x-hidden">
     <div id="root">
-      <div class="min-h-screen flex items-center justify-center font-sans text-slate-400 text-xs uppercase tracking-widest animate-pulse">
+      <div class="min-h-screen flex items-center justify-center font-sans text-slate-400 text-[10px] font-black uppercase tracking-[0.4em] animate-pulse">
         Initializing XtraPro Environment...
       </div>
     </div>
-    <!-- Explicitly load the entry point if the environment doesn't auto-inject it -->
     <script type="module" src="./index.tsx"></script>
 </body>
 </html>
