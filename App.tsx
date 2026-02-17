@@ -86,7 +86,6 @@ const App: React.FC = () => {
         if (scannerRef.current.isScanning) {
           await scannerRef.current.stop();
         }
-        // Always try to clear to release hardware
         await scannerRef.current.clear();
       } catch (e) {
         console.warn("Scanner cleanup warning:", e);
@@ -104,7 +103,6 @@ const App: React.FC = () => {
     setActiveTarget(target);
     setIsScanning(true);
     
-    // Slight delay to allow UI to render the scanner container
     setTimeout(async () => {
       const container = document.getElementById(SCANNER_ID);
       if (!container) {
@@ -117,29 +115,31 @@ const App: React.FC = () => {
         const scanner = new Html5Qrcode(SCANNER_ID);
         scannerRef.current = scanner;
         
+        // Correcting the config for small QR codes
         const config = { 
-          fps: 20, // Slightly reduced for better mobile stability
+          fps: 25,
           qrbox: (viewfinderWidth: number, viewfinderHeight: number) => {
             const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
-            const boxSize = Math.floor(minEdge * 0.7);
+            const boxSize = Math.floor(minEdge * 0.75);
             return { width: boxSize, height: boxSize };
           },
           aspectRatio: 1.0,
           experimentalFeatures: {
             useBarCodeDetectorIfSupported: true
+          },
+          // Resolution hints are passed here in some versions, but mostly 
+          // we rely on the library to pick the best stream for the chosen facingMode.
+          videoConstraints: {
+             width: { ideal: 1280 },
+             height: { ideal: 720 }
           }
         };
         
-        // Attempting a more robust constraint pattern
-        // If "environment" ideal resolution fails, we'll try a fallback in the catch
-        const constraints: MediaTrackConstraints = { 
-          facingMode: { ideal: "environment" },
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
-        };
+        // FIX: The first argument must have EXACTLY 1 KEY if passed as an object
+        const cameraConfig = { facingMode: "environment" };
 
         await scanner.start(
-          constraints,
+          cameraConfig,
           config,
           (decodedText) => {
             const cleaned = decodedText.trim();
@@ -151,11 +151,18 @@ const App: React.FC = () => {
       } catch (err: any) {
         console.error("Camera Initial Attempt Error:", err);
         
-        // Fallback Strategy: Try with minimal constraints if high-res fails
+        // Before fallback, completely clear the state to avoid transition errors
+        if (scannerRef.current) {
+           try { await scannerRef.current.clear(); } catch(e) {}
+        }
+        
+        // Wait a small frame to ensure DOM and camera driver are ready for a new attempt
+        await new Promise(r => setTimeout(r, 500));
+
         try {
           if (scannerRef.current) {
             await scannerRef.current.start(
-              { facingMode: "environment" }, // Minimum requirement
+              { facingMode: "environment" },
               { fps: 15, qrbox: { width: 250, height: 250 } },
               (decodedText) => {
                 const cleaned = decodedText.trim();
@@ -171,19 +178,17 @@ const App: React.FC = () => {
           
           if (fallbackErr.name === 'NotAllowedError' || fallbackErr.message?.includes('Permission')) {
             msg = "ক্যামেরা পারমিশন দেওয়া হয়নি। ব্রাউজার সেটিং থেকে ক্যামেরা এলাউ করুন।";
-          } else if (fallbackErr.name === 'NotFoundError' || fallbackErr.name === 'DevicesNotFoundError') {
+          } else if (fallbackErr.name === 'NotFoundError') {
             msg = "আপনার ডিভাইসে কোনো ক্যামেরা খুঁজে পাওয়া যায়নি।";
-          } else if (fallbackErr.name === 'NotReadableError' || fallbackErr.name === 'TrackStartError') {
-            msg = "ক্যামেরা অন্য কোনো অ্যাপে ব্যবহৃত হচ্ছে। দয়া করে অন্য অ্যাপ বন্ধ করুন।";
-          } else if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost') {
-            msg = "ক্যামেরা ব্যবহারের জন্য সিকিউর কানেকশন (HTTPS) প্রয়োজন।";
+          } else if (fallbackErr.name === 'NotReadableError') {
+            msg = "ক্যামেরা অন্য কোনো অ্যাপে ব্যবহৃত হচ্ছে।";
           }
           
           setError(msg);
           setIsScanning(false);
         }
       }
-    }, 300);
+    }, 400); // Increased delay for stability
   }, [stopScanner]);
 
   const generateId = () => {
@@ -281,9 +286,9 @@ const App: React.FC = () => {
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, "Scanned Records");
       XLSX.writeFile(wb, `XtraPro_Report_${new Date().toISOString().split('T')[0]}.xlsx`);
-      setSuccess("এক্সেল রিপোর্ট ডাউনলোড হচ্ছে...");
+      setSuccess("Report generated.");
     } catch (err) {
-      setError("এক্সেল ফাইল তৈরি করতে সমস্যা হয়েছে।");
+      setError("Error creating report.");
     }
   };
 
@@ -437,7 +442,7 @@ const App: React.FC = () => {
             <div className="flex items-center justify-between mb-2">
               <h2 className="text-xl font-bold flex items-center gap-2">
                 <History className="w-5 h-5 text-blue-400" />
-                Scan History
+                History
               </h2>
               <button
                 onClick={exportToExcel}
@@ -445,14 +450,14 @@ const App: React.FC = () => {
                 className="flex items-center gap-2 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-30 rounded-lg text-xs font-semibold transition-colors border border-slate-700"
               >
                 <FileSpreadsheet className="w-4 h-4 text-emerald-400" />
-                Excel
+                Export
               </button>
             </div>
 
             {isLoading ? (
               <div className="flex flex-col items-center justify-center py-20 gap-4 text-slate-500">
                 <Loader2 className="w-8 h-8 animate-spin" />
-                <p className="text-sm font-medium tracking-wide">Syncing with cloud...</p>
+                <p className="text-sm font-medium tracking-wide">Syncing...</p>
               </div>
             ) : records.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-20 gap-4 text-slate-600 border border-dashed border-slate-800 rounded-3xl bg-slate-900/30">
@@ -462,28 +467,25 @@ const App: React.FC = () => {
             ) : (
               <div className="space-y-3">
                 {records.map((record, idx) => (
-                  <div key={record.id} className="group bg-slate-900 border border-slate-800 rounded-2xl p-4 hover:border-blue-500/30 transition-all shadow-lg shadow-black/20 relative overflow-hidden">
+                  <div key={record.id} className="group bg-slate-900 border border-slate-800 rounded-2xl p-4 hover:border-blue-500/30 transition-all relative overflow-hidden">
                     <div className="absolute top-0 left-0 w-1 h-full bg-blue-600/50" />
                     <div className="flex items-start justify-between mb-3 pl-1">
                       <div className="space-y-1">
                         <div className="flex items-center gap-2">
-                          <span className="text-[8px] font-black uppercase tracking-tighter text-blue-400 bg-blue-500/10 px-1.5 py-0.5 rounded border border-blue-500/20">PART</span>
+                          <span className="text-[8px] font-black uppercase tracking-tighter text-blue-400 bg-blue-500/10 px-1.5 py-0.5 rounded">PART</span>
                           <span className="font-mono text-sm font-bold tracking-tight">{record.partNumber}</span>
                         </div>
                         <div className="flex items-center gap-2">
-                          <span className="text-[8px] font-black uppercase tracking-tighter text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-500/20">SERIAL</span>
+                          <span className="text-[8px] font-black uppercase tracking-tighter text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded">SERIAL</span>
                           <span className="font-mono text-xs text-slate-300 tracking-tight">{record.uniqueCode}</span>
                         </div>
                       </div>
-                      <div className="flex items-center gap-1">
-                        <span className="text-[9px] font-bold text-slate-600 mr-2">#{records.length - idx}</span>
-                        <button 
-                          onClick={() => handleDelete(record.id)}
-                          className="p-2 text-slate-700 hover:text-red-400 hover:bg-red-400/10 rounded-xl transition-all"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
+                      <button 
+                        onClick={() => handleDelete(record.id)}
+                        className="p-2 text-slate-700 hover:text-red-400 hover:bg-red-400/10 rounded-xl transition-all"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
                     </div>
                     {record.analysis && (
                       <div className="text-[11px] text-slate-400 bg-black/30 rounded-xl p-3 border border-slate-800/50 mb-3 leading-relaxed">
@@ -491,11 +493,7 @@ const App: React.FC = () => {
                       </div>
                     )}
                     <div className="flex items-center justify-between text-[9px] text-slate-500 font-bold uppercase tracking-widest pl-1">
-                      <span>{new Date(record.timestamp).toLocaleString([], { hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' })}</span>
-                      <div className="flex items-center gap-1 text-emerald-500">
-                        <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 shadow-[0_0_5px_rgba(16,185,129,0.5)]" />
-                        <span>Validated</span>
-                      </div>
+                      <span>{new Date(record.timestamp).toLocaleString()}</span>
                     </div>
                   </div>
                 ))}
@@ -506,12 +504,12 @@ const App: React.FC = () => {
       </main>
       
       <nav className="fixed bottom-0 left-0 right-0 bg-slate-900/90 backdrop-blur-xl border-t border-slate-800 z-50 px-10 pb-8 pt-4 flex items-center justify-around">
-        <button onClick={() => setCurrentView('scan')} className={`flex flex-col items-center gap-1.5 transition-all ${currentView === 'scan' ? 'text-blue-500 scale-110' : 'text-slate-500'}`}>
-          <Scan className={`w-6 h-6 ${currentView === 'scan' ? 'fill-blue-500/10' : ''}`} />
+        <button onClick={() => setCurrentView('scan')} className={`flex flex-col items-center gap-1.5 transition-all ${currentView === 'scan' ? 'text-blue-500' : 'text-slate-500'}`}>
+          <Scan className="w-6 h-6" />
           <span className="text-[9px] font-black uppercase tracking-[0.2em]">Scanner</span>
         </button>
-        <button onClick={() => setCurrentView('history')} className={`flex flex-col items-center gap-1.5 transition-all ${currentView === 'history' ? 'text-blue-500 scale-110' : 'text-slate-500'}`}>
-          <History className={`w-6 h-6 ${currentView === 'history' ? 'fill-blue-500/10' : ''}`} />
+        <button onClick={() => setCurrentView('history')} className={`flex flex-col items-center gap-1.5 transition-all ${currentView === 'history' ? 'text-blue-500' : 'text-slate-500'}`}>
+          <History className="w-6 h-6" />
           <span className="text-[9px] font-black uppercase tracking-[0.2em]">Records</span>
         </button>
       </nav>
