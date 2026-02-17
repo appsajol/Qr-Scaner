@@ -84,6 +84,7 @@ const App: React.FC = () => {
     if (scannerRef.current && scannerRef.current.isScanning) {
       try {
         await scannerRef.current.stop();
+        scannerRef.current.clear();
       } catch (e) {
         console.warn("Error stopping scanner:", e);
       }
@@ -97,19 +98,36 @@ const App: React.FC = () => {
     setError(null);
     setIsScanning(true);
     
+    // Slight delay to ensure DOM element is ready
     setTimeout(async () => {
       try {
         const scanner = new Html5Qrcode(SCANNER_ID);
         scannerRef.current = scanner;
         
+        // Optimizing for small QR codes:
+        // 1. Higher FPS (30 instead of 15) for smoother detection.
+        // 2. High resolution constraints (1280x720 ideal) to capture more detail in small codes.
+        // 3. Experimental BarcodeDetector API if available.
         const config = { 
-          fps: 15, 
-          qrbox: { width: 260, height: 260 },
-          aspectRatio: 1.0
+          fps: 30, 
+          qrbox: (viewfinderWidth: number, viewfinderHeight: number) => {
+            const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
+            const boxSize = Math.floor(minEdge * 0.7);
+            return { width: boxSize, height: boxSize };
+          },
+          aspectRatio: 1.0,
+          experimentalFeatures: {
+            useBarCodeDetectorIfSupported: true
+          }
         };
         
         await scanner.start(
-          { facingMode: "environment" },
+          { 
+            facingMode: "environment",
+            // Requesting high resolution helps with small codes
+            width: { min: 640, ideal: 1280, max: 1920 },
+            height: { min: 480, ideal: 720, max: 1080 }
+          },
           config,
           (decodedText) => {
             const cleaned = decodedText.trim();
@@ -119,13 +137,14 @@ const App: React.FC = () => {
             }));
             stopScanner();
           },
-          () => {} 
+          () => {} // Ignored for performance
         );
       } catch (err) {
-        setError("ক্যামেরা এক্সেস করা যায়নি।");
+        console.error("Scanner Error:", err);
+        setError("ক্যামেরা এক্সেস করা যায়নি। ক্যামেরা অনুমতি চেক করুন।");
         setIsScanning(false);
       }
-    }, 100);
+    }, 150);
   }, [stopScanner]);
 
   const generateId = () => {
@@ -272,12 +291,15 @@ const App: React.FC = () => {
         {currentView === 'scan' && (
           <div className="animate-in fade-in duration-300 space-y-6">
             {isScanning && (
-              <section className="bg-slate-900 rounded-2xl overflow-hidden shadow-xl relative aspect-square max-w-[280px] mx-auto w-full mb-4 border-2 border-white">
+              <section className="bg-slate-900 rounded-2xl overflow-hidden shadow-xl relative aspect-square max-w-[320px] mx-auto w-full mb-4 border-2 border-white">
                 <div id={SCANNER_ID} className="w-full h-full bg-black"></div>
                 <ScannerOverlay activeTarget={activeTarget} isScanning={isScanning} />
                 <button onClick={stopScanner} className="absolute top-3 right-3 bg-black/40 hover:bg-black/60 backdrop-blur-md text-white p-1.5 rounded-full z-20">
                   <X className="w-5 h-5" />
                 </button>
+                <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-white/70 text-[10px] font-bold uppercase tracking-widest bg-black/40 px-3 py-1 rounded-full backdrop-blur-sm z-10 text-center">
+                  Hold close for small codes
+                </div>
               </section>
             )}
 
