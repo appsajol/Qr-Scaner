@@ -16,7 +16,9 @@ import {
   ScanLine,
   CheckCircle,
   Scan,
-  ChevronRight
+  ChevronRight,
+  Cloud,
+  Wifi
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { ScannedRecord, ScanSession, ScanTarget } from './types.ts';
@@ -39,8 +41,20 @@ const App: React.FC = () => {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isTransitioning, setIsTransitioning] = useState(false);
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
   
   const scannerRef = useRef<Html5Qrcode | null>(null);
+
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
 
   const fetchRecords = useCallback(async () => {
     setIsLoading(true);
@@ -295,19 +309,13 @@ const App: React.FC = () => {
             </div>
             <h1 className="font-bold text-lg tracking-tight">XtraPro AI</h1>
           </div>
-          <div className="flex bg-slate-800 p-1 rounded-xl">
-            <button 
-              onClick={() => setCurrentView('scan')}
-              className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-all ${currentView === 'scan' ? 'bg-slate-700 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200'}`}
-            >
-              Scan
-            </button>
-            <button 
-              onClick={() => setCurrentView('history')}
-              className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-all ${currentView === 'history' ? 'bg-slate-700 text-white shadow-sm' : 'text-slate-400 hover:text-slate-200'}`}
-            >
-              History
-            </button>
+          
+          <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-800/50 rounded-full border border-slate-700/50">
+             <div className={`w-1.5 h-1.5 rounded-full ${isOnline ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
+             <Cloud className={`w-3.5 h-3.5 ${isOnline ? 'text-blue-400' : 'text-slate-500'}`} />
+             <span className="text-[10px] font-black uppercase tracking-wider text-slate-300">
+               {isOnline ? 'Synced' : 'Offline'}
+             </span>
           </div>
         </div>
       </nav>
@@ -424,7 +432,7 @@ const App: React.FC = () => {
                   <RefreshCw className="w-4 h-4" />
                 </div>
                 <div className="text-[10px] uppercase font-bold tracking-wider">
-                  <p className="text-slate-300">Cloud Sync Enabled</p>
+                  <p className="text-slate-300">Cloud Sync Active</p>
                   <p className="opacity-50">Secure Validation</p>
                 </div>
               </div>
