@@ -86,9 +86,10 @@ const App: React.FC = () => {
         if (scannerRef.current.isScanning) {
           await scannerRef.current.stop();
         }
+        // Always try to clear to release hardware
         await scannerRef.current.clear();
       } catch (e) {
-        console.warn("Cleanup error:", e);
+        console.warn("Scanner cleanup warning:", e);
       } finally {
         scannerRef.current = null;
         setIsScanning(false);
@@ -103,6 +104,7 @@ const App: React.FC = () => {
     setActiveTarget(target);
     setIsScanning(true);
     
+    // Slight delay to allow UI to render the scanner container
     setTimeout(async () => {
       const container = document.getElementById(SCANNER_ID);
       if (!container) {
@@ -116,10 +118,10 @@ const App: React.FC = () => {
         scannerRef.current = scanner;
         
         const config = { 
-          fps: 30,
+          fps: 20, // Slightly reduced for better mobile stability
           qrbox: (viewfinderWidth: number, viewfinderHeight: number) => {
             const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
-            const boxSize = Math.floor(minEdge * 0.65);
+            const boxSize = Math.floor(minEdge * 0.7);
             return { width: boxSize, height: boxSize };
           },
           aspectRatio: 1.0,
@@ -128,8 +130,10 @@ const App: React.FC = () => {
           }
         };
         
+        // Attempting a more robust constraint pattern
+        // If "environment" ideal resolution fails, we'll try a fallback in the catch
         const constraints: MediaTrackConstraints = { 
-          facingMode: "environment",
+          facingMode: { ideal: "environment" },
           width: { ideal: 1280 },
           height: { ideal: 720 }
         };
@@ -145,15 +149,41 @@ const App: React.FC = () => {
           () => {} 
         );
       } catch (err: any) {
-        console.error("Camera Error:", err);
-        let msg = "ক্যামেরা এক্সেস করা যায়নি।";
-        if (err.name === 'NotAllowedError') msg = "ক্যামেরা পারমিশন ডিনাইড। ব্রাউজার সেটিং চেক করুন।";
-        else if (err.name === 'NotReadableError') msg = "ক্যামেরা অন্য কোথাও ব্যবহৃত হচ্ছে।";
+        console.error("Camera Initial Attempt Error:", err);
         
-        setError(msg);
-        setIsScanning(false);
+        // Fallback Strategy: Try with minimal constraints if high-res fails
+        try {
+          if (scannerRef.current) {
+            await scannerRef.current.start(
+              { facingMode: "environment" }, // Minimum requirement
+              { fps: 15, qrbox: { width: 250, height: 250 } },
+              (decodedText) => {
+                const cleaned = decodedText.trim();
+                setSession(prev => ({ ...prev, [target]: cleaned }));
+                stopScanner();
+              },
+              () => {}
+            );
+          }
+        } catch (fallbackErr: any) {
+          console.error("Camera Fallback Error:", fallbackErr);
+          let msg = "ক্যামেরা এক্সেস করা যায়নি।";
+          
+          if (fallbackErr.name === 'NotAllowedError' || fallbackErr.message?.includes('Permission')) {
+            msg = "ক্যামেরা পারমিশন দেওয়া হয়নি। ব্রাউজার সেটিং থেকে ক্যামেরা এলাউ করুন।";
+          } else if (fallbackErr.name === 'NotFoundError' || fallbackErr.name === 'DevicesNotFoundError') {
+            msg = "আপনার ডিভাইসে কোনো ক্যামেরা খুঁজে পাওয়া যায়নি।";
+          } else if (fallbackErr.name === 'NotReadableError' || fallbackErr.name === 'TrackStartError') {
+            msg = "ক্যামেরা অন্য কোনো অ্যাপে ব্যবহৃত হচ্ছে। দয়া করে অন্য অ্যাপ বন্ধ করুন।";
+          } else if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost') {
+            msg = "ক্যামেরা ব্যবহারের জন্য সিকিউর কানেকশন (HTTPS) প্রয়োজন।";
+          }
+          
+          setError(msg);
+          setIsScanning(false);
+        }
       }
-    }, 250);
+    }, 300);
   }, [stopScanner]);
 
   const generateId = () => {
@@ -182,15 +212,14 @@ const App: React.FC = () => {
         .maybeSingle();
 
       if (existing) {
-        setError(`ডুপ্লিকেট কোড: ইতিপূর্বে ব্যবহৃত হয়েছে।`);
+        setError(`ডুপ্লিকেট কোড: এই সিরিয়ালটি ইতিপূর্বে ব্যবহৃত হয়েছে।`);
         setIsAnalyzing(false);
         return;
       }
 
-      // Fix: Complete the truncated logic for Gemini analysis and Supabase insertion
       const analysis = await analyzeScanPair(session.partNumber, session.uniqueCode);
       
-      const newRecord = {
+      const newRecordData = {
         id: generateId(),
         part_number: session.partNumber,
         unique_code: session.uniqueCode,
@@ -200,24 +229,24 @@ const App: React.FC = () => {
 
       const { error: insertErr } = await supabase
         .from('scanned_records')
-        .insert([newRecord]);
+        .insert([newRecordData]);
 
       if (insertErr) throw insertErr;
 
       setRecords(prev => [{
-        id: newRecord.id,
-        partNumber: newRecord.part_number,
-        uniqueCode: newRecord.unique_code,
-        timestamp: newRecord.timestamp,
+        id: newRecordData.id,
+        partNumber: newRecordData.part_number,
+        uniqueCode: newRecordData.unique_code,
+        timestamp: newRecordData.timestamp,
         status: 'synced' as const,
-        analysis: newRecord.analysis
+        analysis: newRecordData.analysis
       }, ...prev]);
 
       setSession({ partNumber: null, uniqueCode: null });
-      setSuccess("ডেটা সফলভাবে সংরক্ষিত হয়েছে।");
+      setSuccess("সফলভাবে সেভ করা হয়েছে।");
     } catch (err) {
       console.error("Save error:", err);
-      setError("ডেটা সংরক্ষণ করতে সমস্যা হয়েছে।");
+      setError("ডেটা ক্লাউডে পাঠাতে সমস্যা হয়েছে। ইন্টারনেট চেক করুন।");
     } finally {
       setIsAnalyzing(false);
     }
@@ -242,15 +271,20 @@ const App: React.FC = () => {
   };
 
   const exportToExcel = () => {
-    const ws = XLSX.utils.json_to_sheet(records.map(r => ({
-      'Part Number': r.partNumber,
-      'Unique Code': r.uniqueCode,
-      'Timestamp': new Date(r.timestamp).toLocaleString(),
-      'Analysis': r.analysis
-    })));
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Scans");
-    XLSX.writeFile(wb, `manufacturing_scans_${new Date().toISOString().split('T')[0]}.xlsx`);
+    try {
+      const ws = XLSX.utils.json_to_sheet(records.map(r => ({
+        'Part Number': r.partNumber,
+        'Unique Serial': r.uniqueCode,
+        'Date & Time': new Date(r.timestamp).toLocaleString(),
+        'Verification': r.analysis
+      })));
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Scanned Records");
+      XLSX.writeFile(wb, `XtraPro_Report_${new Date().toISOString().split('T')[0]}.xlsx`);
+      setSuccess("এক্সেল রিপোর্ট ডাউনলোড হচ্ছে...");
+    } catch (err) {
+      setError("এক্সেল ফাইল তৈরি করতে সমস্যা হয়েছে।");
+    }
   };
 
   return (
@@ -261,7 +295,7 @@ const App: React.FC = () => {
             <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center shadow-lg shadow-blue-900/20">
               <ScanLine className="w-5 h-5 text-white" />
             </div>
-            <h1 className="font-bold text-lg tracking-tight">FactoryScan AI</h1>
+            <h1 className="font-bold text-lg tracking-tight">XtraPro AI</h1>
           </div>
           <div className="flex bg-slate-800 p-1 rounded-xl">
             <button 
@@ -284,7 +318,7 @@ const App: React.FC = () => {
         {error && (
           <div className="mb-4 p-4 bg-red-500/10 border border-red-500/20 rounded-2xl flex items-start gap-3 animate-in fade-in slide-in-from-top-2">
             <AlertCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
-            <div className="flex-1 text-sm text-red-200/90">{error}</div>
+            <div className="flex-1 text-sm text-red-200/90 leading-tight">{error}</div>
             <button onClick={() => setError(null)} className="text-red-400 hover:text-red-300">
               <X className="w-4 h-4" />
             </button>
@@ -305,9 +339,9 @@ const App: React.FC = () => {
                 {isScanning ? (
                   <div id={SCANNER_ID} className="w-full h-full object-cover" />
                 ) : (
-                  <div className="flex flex-col items-center gap-4 text-slate-500">
+                  <div className="flex flex-col items-center gap-4 text-slate-600">
                     <Camera className="w-16 h-16 stroke-1 opacity-20" />
-                    <p className="text-sm font-medium">Camera Inactive</p>
+                    <p className="text-sm font-medium uppercase tracking-widest opacity-40">Ready to Scan</p>
                   </div>
                 )}
                 {isScanning && <ScannerOverlay activeTarget={activeTarget} isScanning={isScanning} />}
@@ -315,7 +349,7 @@ const App: React.FC = () => {
                 {isScanning && (
                   <button 
                     onClick={stopScanner}
-                    className="absolute top-4 right-4 z-20 w-10 h-10 bg-black/50 backdrop-blur-md rounded-full flex items-center justify-center text-white hover:bg-black/70 transition-colors"
+                    className="absolute top-4 right-4 z-20 w-10 h-10 bg-black/50 backdrop-blur-md rounded-full flex items-center justify-center text-white hover:bg-black/70 transition-colors border border-white/10"
                   >
                     <X className="w-5 h-5" />
                   </button>
@@ -330,15 +364,15 @@ const App: React.FC = () => {
                       session.partNumber 
                         ? 'border-emerald-500/50 bg-emerald-500/5 text-emerald-400' 
                         : activeTarget === ScanTarget.PART_NUMBER && isScanning
-                          ? 'border-blue-500 bg-blue-500/10 text-blue-400'
+                          ? 'border-blue-500 bg-blue-500/10 text-blue-400 animate-pulse'
                           : 'border-slate-800 bg-slate-800/50 text-slate-400 hover:border-slate-700'
                     }`}
                   >
                     <div className="w-10 h-10 rounded-full bg-current/10 flex items-center justify-center mb-2">
                       {session.partNumber ? <CheckCircle className="w-5 h-5" /> : <Package className="w-5 h-5" />}
                     </div>
-                    <span className="text-[10px] font-black uppercase tracking-widest mb-1">Part No</span>
-                    <span className="text-xs font-mono truncate max-w-full">
+                    <span className="text-[10px] font-black uppercase tracking-widest mb-1">Part Number</span>
+                    <span className="text-xs font-mono truncate max-w-full font-bold">
                       {session.partNumber || "Pending..."}
                     </span>
                   </button>
@@ -349,15 +383,15 @@ const App: React.FC = () => {
                       session.uniqueCode 
                         ? 'border-emerald-500/50 bg-emerald-500/5 text-emerald-400' 
                         : activeTarget === ScanTarget.UNIQUE_CODE && isScanning
-                          ? 'border-blue-500 bg-blue-500/10 text-blue-400'
+                          ? 'border-blue-500 bg-blue-500/10 text-blue-400 animate-pulse'
                           : 'border-slate-800 bg-slate-800/50 text-slate-400 hover:border-slate-700'
                     }`}
                   >
                     <div className="w-10 h-10 rounded-full bg-current/10 flex items-center justify-center mb-2">
                       {session.uniqueCode ? <CheckCircle className="w-5 h-5" /> : <Hash className="w-5 h-5" />}
                     </div>
-                    <span className="text-[10px] font-black uppercase tracking-widest mb-1">Serial</span>
-                    <span className="text-xs font-mono truncate max-w-full">
+                    <span className="text-[10px] font-black uppercase tracking-widest mb-1">Unique Serial</span>
+                    <span className="text-xs font-mono truncate max-w-full font-bold">
                       {session.uniqueCode || "Pending..."}
                     </span>
                   </button>
@@ -366,7 +400,7 @@ const App: React.FC = () => {
                 <button
                   onClick={handleSave}
                   disabled={!session.partNumber || !session.uniqueCode || isAnalyzing}
-                  className="w-full py-4 px-6 bg-blue-600 hover:bg-blue-500 disabled:opacity-30 disabled:hover:bg-blue-600 rounded-2xl font-bold text-white shadow-xl shadow-blue-900/20 transition-all flex items-center justify-center gap-3 active:scale-[0.98]"
+                  className="w-full py-4 px-6 bg-blue-600 hover:bg-blue-500 disabled:opacity-30 disabled:grayscale rounded-2xl font-black text-white shadow-xl shadow-blue-900/20 transition-all flex items-center justify-center gap-3 active:scale-[0.98] uppercase tracking-widest text-sm"
                 >
                   {isAnalyzing ? (
                     <>
@@ -376,23 +410,26 @@ const App: React.FC = () => {
                   ) : (
                     <>
                       <CheckCircle2 className="w-5 h-5" />
-                      Complete Scan Pair
+                      Save Scan Pair
                     </>
                   )}
                 </button>
               </div>
             </div>
 
-            <div className="bg-slate-900/50 border border-slate-800/50 rounded-2xl p-4">
+            <div className="bg-slate-900/50 border border-slate-800/50 rounded-2xl p-4 flex items-center justify-between">
               <div className="flex items-center gap-3 text-slate-400">
                 <div className="w-8 h-8 rounded-full bg-slate-800 flex items-center justify-center">
                   <RefreshCw className="w-4 h-4" />
                 </div>
-                <div className="text-xs">
-                  <p className="font-semibold text-slate-300">Auto-sync active</p>
-                  <p className="opacity-60">Scans are verified and stored instantly.</p>
+                <div className="text-[10px] uppercase font-bold tracking-wider">
+                  <p className="text-slate-300">Cloud Sync Enabled</p>
+                  <p className="opacity-50">Secure Validation</p>
                 </div>
               </div>
+              <button onClick={() => setSession({partNumber: null, uniqueCode: null})} className="text-[10px] font-black uppercase text-slate-500 hover:text-red-400 transition-colors">
+                Reset
+              </button>
             </div>
           </div>
         ) : (
@@ -400,7 +437,7 @@ const App: React.FC = () => {
             <div className="flex items-center justify-between mb-2">
               <h2 className="text-xl font-bold flex items-center gap-2">
                 <History className="w-5 h-5 text-blue-400" />
-                Scan Records
+                Scan History
               </h2>
               <button
                 onClick={exportToExcel}
@@ -408,52 +445,56 @@ const App: React.FC = () => {
                 className="flex items-center gap-2 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-30 rounded-lg text-xs font-semibold transition-colors border border-slate-700"
               >
                 <FileSpreadsheet className="w-4 h-4 text-emerald-400" />
-                Export
+                Excel
               </button>
             </div>
 
             {isLoading ? (
               <div className="flex flex-col items-center justify-center py-20 gap-4 text-slate-500">
                 <Loader2 className="w-8 h-8 animate-spin" />
-                <p className="text-sm">Loading records...</p>
+                <p className="text-sm font-medium tracking-wide">Syncing with cloud...</p>
               </div>
             ) : records.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-20 gap-4 text-slate-500 border border-dashed border-slate-800 rounded-3xl bg-slate-900/30">
+              <div className="flex flex-col items-center justify-center py-20 gap-4 text-slate-600 border border-dashed border-slate-800 rounded-3xl bg-slate-900/30">
                 <Scan className="w-12 h-12 opacity-10" />
-                <p className="text-sm">No scans recorded yet.</p>
+                <p className="text-sm font-medium">No records found.</p>
               </div>
             ) : (
               <div className="space-y-3">
-                {records.map((record) => (
-                  <div key={record.id} className="group bg-slate-900 border border-slate-800 rounded-2xl p-4 hover:border-slate-700 transition-all shadow-lg shadow-black/20">
-                    <div className="flex items-start justify-between mb-3">
+                {records.map((record, idx) => (
+                  <div key={record.id} className="group bg-slate-900 border border-slate-800 rounded-2xl p-4 hover:border-blue-500/30 transition-all shadow-lg shadow-black/20 relative overflow-hidden">
+                    <div className="absolute top-0 left-0 w-1 h-full bg-blue-600/50" />
+                    <div className="flex items-start justify-between mb-3 pl-1">
                       <div className="space-y-1">
                         <div className="flex items-center gap-2">
-                          <span className="text-[10px] font-black uppercase tracking-tighter text-blue-400 bg-blue-500/10 px-1.5 py-0.5 rounded">Part</span>
-                          <span className="font-mono text-sm font-bold">{record.partNumber}</span>
+                          <span className="text-[8px] font-black uppercase tracking-tighter text-blue-400 bg-blue-500/10 px-1.5 py-0.5 rounded border border-blue-500/20">PART</span>
+                          <span className="font-mono text-sm font-bold tracking-tight">{record.partNumber}</span>
                         </div>
                         <div className="flex items-center gap-2">
-                          <span className="text-[10px] font-black uppercase tracking-tighter text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded">Serial</span>
-                          <span className="font-mono text-xs text-slate-300">{record.uniqueCode}</span>
+                          <span className="text-[8px] font-black uppercase tracking-tighter text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded border border-emerald-500/20">SERIAL</span>
+                          <span className="font-mono text-xs text-slate-300 tracking-tight">{record.uniqueCode}</span>
                         </div>
                       </div>
-                      <button 
-                        onClick={() => handleDelete(record.id)}
-                        className="p-2 text-slate-600 hover:text-red-400 hover:bg-red-400/10 rounded-xl transition-all"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
+                      <div className="flex items-center gap-1">
+                        <span className="text-[9px] font-bold text-slate-600 mr-2">#{records.length - idx}</span>
+                        <button 
+                          onClick={() => handleDelete(record.id)}
+                          className="p-2 text-slate-700 hover:text-red-400 hover:bg-red-400/10 rounded-xl transition-all"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
                     </div>
                     {record.analysis && (
-                      <div className="text-xs text-slate-400 bg-black/20 rounded-xl p-3 border border-slate-800/50 mb-3 leading-relaxed italic">
-                        "{record.analysis}"
+                      <div className="text-[11px] text-slate-400 bg-black/30 rounded-xl p-3 border border-slate-800/50 mb-3 leading-relaxed">
+                        <p className="opacity-80 leading-snug"><span className="text-blue-400 font-bold mr-1">AI:</span>{record.analysis}</p>
                       </div>
                     )}
-                    <div className="flex items-center justify-between text-[10px] text-slate-500 font-medium">
-                      <span>{new Date(record.timestamp).toLocaleString()}</span>
+                    <div className="flex items-center justify-between text-[9px] text-slate-500 font-bold uppercase tracking-widest pl-1">
+                      <span>{new Date(record.timestamp).toLocaleString([], { hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' })}</span>
                       <div className="flex items-center gap-1 text-emerald-500">
-                        <CheckCircle2 className="w-3 h-3" />
-                        <span>Verified</span>
+                        <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 shadow-[0_0_5px_rgba(16,185,129,0.5)]" />
+                        <span>Validated</span>
                       </div>
                     </div>
                   </div>
@@ -464,15 +505,18 @@ const App: React.FC = () => {
         )}
       </main>
       
-      {currentView === 'scan' && !isScanning && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 w-max px-4 py-2 bg-slate-800/80 backdrop-blur-md rounded-full border border-slate-700 flex items-center gap-2 shadow-2xl">
-          <ChevronRight className="w-4 h-4 text-blue-400 animate-pulse" />
-          <span className="text-[10px] font-bold text-slate-300 uppercase tracking-widest">Tap a button above to scan</span>
-        </div>
-      )}
+      <nav className="fixed bottom-0 left-0 right-0 bg-slate-900/90 backdrop-blur-xl border-t border-slate-800 z-50 px-10 pb-8 pt-4 flex items-center justify-around">
+        <button onClick={() => setCurrentView('scan')} className={`flex flex-col items-center gap-1.5 transition-all ${currentView === 'scan' ? 'text-blue-500 scale-110' : 'text-slate-500'}`}>
+          <Scan className={`w-6 h-6 ${currentView === 'scan' ? 'fill-blue-500/10' : ''}`} />
+          <span className="text-[9px] font-black uppercase tracking-[0.2em]">Scanner</span>
+        </button>
+        <button onClick={() => setCurrentView('history')} className={`flex flex-col items-center gap-1.5 transition-all ${currentView === 'history' ? 'text-blue-500 scale-110' : 'text-slate-500'}`}>
+          <History className={`w-6 h-6 ${currentView === 'history' ? 'fill-blue-500/10' : ''}`} />
+          <span className="text-[9px] font-black uppercase tracking-[0.2em]">Records</span>
+        </button>
+      </nav>
     </div>
   );
 };
 
-// Fixed: Added missing default export
 export default App;
